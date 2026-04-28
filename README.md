@@ -32,17 +32,21 @@ it back. Use the `Quit` button or `Ctrl+Alt+Q` to fully exit.
 - `Ctrl+Alt+T`: toggle the warm dim overlay.
 - `Ctrl+Alt+Up`: increase overlay warmth/dimming.
 - `Ctrl+Alt+Down`: decrease overlay warmth/dimming.
-- `Ctrl+Alt+R`: reload `comfort_layout.json`.
+- `Ctrl+Alt+R`: reset selected panels to their saved view.
 - `Ctrl+Alt+Q`: quit.
 
 ## Modes
 
 `Comfort Dual` creates two virtual-monitor panes on the target display. It only
 arranges windows that are already on that same display, so it will not pull a
-laptop-screen window onto the TV. After Comfort Dual is selected, manually moved
-windows on that display snap back into the nearest pane unless Apple Float is on.
-Clicking the `Comfort Dual` button opens a selector so you can choose the exact
-left and right panel windows; the hotkey keeps using the recent-window shortcut.
+laptop-screen window onto the TV. Once panels are selected, you can still drag
+or click windows normally; use `Reset View` or `Ctrl+Alt+R` to restore the
+selected panels to their saved pane positions.
+Clicking the `Comfort Dual` button temporarily shrinks the eligible windows on
+that display into a picker grid. Click anywhere on the preview you want for the
+left panel, then click anywhere on the preview you want for the right panel;
+unselected windows return to where they were. The hotkey keeps using the
+recent-window shortcut.
 
 `Apple Float` temporarily allows free-form window placement on the target
 display. It does not add a visual overlay.
@@ -55,7 +59,7 @@ If Windows refuses to move a protected, elevated, or otherwise restricted window
 ## Configuration
 
 Edit `comfort_layout.json` to tune margins, gap, and overlay strength. Press
-`Ctrl+Alt+R` after editing to reload.
+the `Reset View` button to restore the selected panels after moving them.
 
 ## Verify
 

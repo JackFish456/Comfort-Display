@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import math
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
@@ -41,7 +42,6 @@ PANEL_BG = "#eadfff"
 BUTTON_BG = "#ded0ff"
 BUTTON_ACTIVE_BG = "#d2c0ff"
 TEXT_FG = "#241b35"
-SNAP_TOLERANCE = 16
 
 VK = {
     "1": 0x31,
@@ -65,7 +65,7 @@ HOTKEYS = {
     6: ("Ctrl+Alt+T", VK["T"], "toggle_overlay"),
     7: ("Ctrl+Alt+Up", VK["UP"], "overlay_up"),
     8: ("Ctrl+Alt+Down", VK["DOWN"], "overlay_down"),
-    9: ("Ctrl+Alt+R", VK["R"], "reload_config"),
+    9: ("Ctrl+Alt+R", VK["R"], "reset_view"),
     10: ("Ctrl+Alt+Q", VK["Q"], "quit"),
 }
 
@@ -122,8 +122,7 @@ class ComfortWorkspaceApp:
         self.hotkey_failures: list[str] = []
         self.last_active_hwnd: int | None = None
         self.active_history: list[int] = []
-        self.auto_snap_work_area: Rect | None = None
-        self.auto_snapping_hwnd: int | None = None
+        self.picker_active = False
         self.structured_windows: dict[int, Rect] = {}
         self.tray_added = False
         self.tray_hwnd: int | None = None
@@ -178,8 +177,8 @@ class ComfortWorkspaceApp:
         frame.pack(padx=8, pady=8)
         ttk.Button(frame, text="Comfort Dual", command=self.open_dual_selector).grid(row=0, column=0, **pad)
         ttk.Button(frame, text="Reading Pane", command=self.place_reading).grid(row=0, column=1, **pad)
-        ttk.Button(frame, text="Apple Float", command=self.toggle_apple).grid(row=1, column=0, **pad)
-        ttk.Button(frame, text="Reload Config", command=self.reload_config).grid(row=1, column=1, **pad)
+        ttk.Button(frame, text="Free Float", command=self.toggle_apple).grid(row=1, column=0, **pad)
+        ttk.Button(frame, text="Reset View", command=self.reset_view).grid(row=1, column=1, **pad)
         ttk.Button(frame, text="Quit", command=self.quit).grid(row=2, column=0, columnspan=2, **pad)
 
     def setup_tray_icon(self) -> None:
@@ -335,7 +334,6 @@ class ComfortWorkspaceApp:
         if hwnd:
             self.last_active_hwnd = hwnd
             self.remember_window(hwnd)
-            self.snap_window_if_needed(hwnd)
         self.root.after(100, self.observe_active_window)
 
     def remember_window(self, hwnd: int) -> None:
@@ -415,49 +413,6 @@ class ComfortWorkspaceApp:
         except Exception:
             return self.work_area
 
-    def snap_window_if_needed(self, hwnd: int) -> None:
-        if self.apple_enabled or self.auto_snap_work_area is None:
-            return
-        if hwnd == self.auto_snapping_hwnd:
-            return
-        try:
-            if winapi.get_window_work_area(hwnd) != self.auto_snap_work_area:
-                return
-            current = winapi.get_window_rect(hwnd)
-        except Exception:
-            return
-
-        structured_rect = self.structured_windows.get(hwnd)
-        if structured_rect is not None:
-            if self.rects_close(current, structured_rect):
-                return
-            self.structured_windows.pop(hwnd, None)
-
-        left, right = dual_panes(self.auto_snap_work_area, self.active_dual_preset)
-        if self.rects_close(current, left) or self.rects_close(current, right):
-            return
-
-        target = self.nearest_pane(current, left, right)
-        self.auto_snapping_hwnd = hwnd
-        try:
-            winapi.move_window(hwnd, target)
-        finally:
-            self.auto_snapping_hwnd = None
-
-    def rects_close(self, first: Rect, second: Rect) -> bool:
-        return (
-            abs(first.x - second.x) <= SNAP_TOLERANCE
-            and abs(first.y - second.y) <= SNAP_TOLERANCE
-            and abs(first.width - second.width) <= SNAP_TOLERANCE
-            and abs(first.height - second.height) <= SNAP_TOLERANCE
-        )
-
-    def nearest_pane(self, current: Rect, left: Rect, right: Rect) -> Rect:
-        current_center = current.x + (current.width // 2)
-        left_center = left.x + (left.width // 2)
-        right_center = right.x + (right.width // 2)
-        return left if abs(current_center - left_center) <= abs(current_center - right_center) else right
-
     def move_active_to(self, rect: Rect, label: str) -> None:
         hwnd = self.target_window()
         if not hwnd:
@@ -480,7 +435,6 @@ class ComfortWorkspaceApp:
         hwnd = self.target_window()
         left, _ = self.dual_rects_for(hwnd)
         if hwnd:
-            self.auto_snap_work_area = self.work_area_for(hwnd)
             self.structured_windows[hwnd] = left
         self.move_window_to(hwnd, left, "Left pane")
 
@@ -488,7 +442,6 @@ class ComfortWorkspaceApp:
         hwnd = self.target_window()
         _, right = self.dual_rects_for(hwnd)
         if hwnd:
-            self.auto_snap_work_area = self.work_area_for(hwnd)
             self.structured_windows[hwnd] = right
         self.move_window_to(hwnd, right, "Right pane")
 
@@ -500,85 +453,130 @@ class ComfortWorkspaceApp:
 
         area = self.work_area_for(target)
         windows = self.windows_on_work_area(area)
-        labels = self.window_choice_labels(windows)
-        if len(labels) < 2:
+        if len(windows) < 2:
             self.place_dual()
             return
 
-        selector = tk.Toplevel(self.root)
-        selector.title("Choose Dual Panels")
-        selector.configure(bg=APP_BG)
-        selector.resizable(False, False)
-        selector.transient(self.root)
-        selector.attributes("-topmost", True)
+        self.start_spatial_dual_picker(area, windows)
 
-        frame = ttk.Frame(selector)
-        frame.pack(padx=10, pady=10)
-        choices = list(labels.keys())
-        defaults = self.recent_windows_on_work_area(area, limit=2)
-        default_labels = [
-            label
-            for label, hwnd in labels.items()
-            if hwnd in defaults
-        ]
+    def preview_rects(self, area: Rect, count: int) -> list[Rect]:
+        columns = min(4, max(2, math.ceil(math.sqrt(count))))
+        rows = math.ceil(count / columns)
+        gap = 28
+        tile_width = min(760, (area.width - (gap * (columns + 1))) // columns)
+        tile_height = min(460, (area.height - (gap * (rows + 1))) // rows)
+        total_width = (tile_width * columns) + (gap * (columns - 1))
+        total_height = (tile_height * rows) + (gap * (rows - 1))
+        start_x = area.x + max(gap, (area.width - total_width) // 2)
+        start_y = area.y + max(gap, (area.height - total_height) // 2)
 
-        ttk.Label(frame, text="Left").grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
-        left_var = tk.StringVar(value=default_labels[0] if default_labels else choices[0])
-        left_box = ttk.Combobox(frame, textvariable=left_var, values=choices, state="readonly", width=42)
-        left_box.grid(row=1, column=0, padx=4, pady=(0, 6))
+        rects: list[Rect] = []
+        for index in range(count):
+            row = index // columns
+            column = index % columns
+            rects.append(
+                Rect(
+                    start_x + (column * (tile_width + gap)),
+                    start_y + (row * (tile_height + gap)),
+                    tile_width,
+                    tile_height,
+                )
+            )
+        return rects
 
-        ttk.Label(frame, text="Right").grid(row=2, column=0, sticky="w", padx=4, pady=(0, 2))
-        fallback_right = choices[1] if len(choices) > 1 else choices[0]
-        right_var = tk.StringVar(value=default_labels[1] if len(default_labels) > 1 else fallback_right)
-        right_box = ttk.Combobox(frame, textvariable=right_var, values=choices, state="readonly", width=42)
-        right_box.grid(row=3, column=0, padx=4, pady=(0, 8))
+    def start_spatial_dual_picker(self, area: Rect, windows: list[int]) -> None:
+        original_rects: dict[int, Rect] = {}
+        badges: list[tk.Toplevel] = []
+        selected: list[int] = []
+        previews = self.preview_rects(area, len(windows))
+        self.picker_active = True
 
-        message_var = tk.StringVar()
-        ttk.Label(frame, textvariable=message_var).grid(row=4, column=0, padx=4, pady=(0, 6))
+        def cleanup(restore_unselected: bool) -> None:
+            for badge in badges:
+                if badge.winfo_exists():
+                    badge.destroy()
+            if restore_unselected:
+                for hwnd, rect in original_rects.items():
+                    if hwnd not in selected:
+                        winapi.move_window(hwnd, rect)
+            self.picker_active = False
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=5, column=0)
-        ttk.Button(
-            actions,
-            text="Apply",
-            command=lambda: self.apply_dual_selection(
-                selector,
-                labels,
-                left_var.get(),
-                right_var.get(),
-                area,
-                message_var,
-            ),
-        ).grid(row=0, column=0, padx=4)
-        ttk.Button(actions, text="Cancel", command=selector.destroy).grid(row=0, column=1, padx=4)
-        left_box.focus_set()
+        def cancel() -> None:
+            cleanup(restore_unselected=True)
+            self.refresh_labels("Comfort Dual: picker cancelled")
 
-    def apply_dual_selection(
-        self,
-        selector: tk.Toplevel,
-        labels: dict[str, int],
-        left_label: str,
-        right_label: str,
-        area: Rect,
-        message_var: tk.StringVar,
-    ) -> None:
-        left_hwnd = labels.get(left_label)
-        right_hwnd = labels.get(right_label)
-        if not left_hwnd or not right_hwnd:
-            message_var.set("Choose two windows.")
-            return
-        if left_hwnd == right_hwnd:
-            message_var.set("Choose different windows.")
-            return
+        def choose(hwnd: int) -> None:
+            if hwnd in selected:
+                return
+            selected.append(hwnd)
+            if len(selected) < 2:
+                for badge in badges:
+                    if int(getattr(badge, "selected_hwnd", 0)) == hwnd and badge.winfo_exists():
+                        badge.configure(bg=BUTTON_ACTIVE_BG)
+                        for child in badge.winfo_children():
+                            child.configure(bg=BUTTON_ACTIVE_BG)
+                self.refresh_labels("Comfort Dual: choose right panel")
+                return
 
+            cleanup(restore_unselected=True)
+            self.apply_dual_pair(selected[0], selected[1], area)
+
+        for hwnd, rect in zip(windows, previews, strict=False):
+            try:
+                original_rects[hwnd] = winapi.get_window_rect(hwnd)
+            except Exception:
+                continue
+            winapi.move_window(hwnd, rect)
+
+            badge = tk.Toplevel(self.root)
+            badge.overrideredirect(True)
+            badge.attributes("-topmost", True)
+            badge.attributes("-alpha", 0.01)
+            badge.configure(bg=APP_BG)
+            badge.geometry(f"{rect.width}x{rect.height}+{rect.x}+{rect.y}")
+            badge.selected_hwnd = hwnd
+            badge.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+
+            label_badge = tk.Toplevel(self.root)
+            label_badge.overrideredirect(True)
+            label_badge.attributes("-topmost", True)
+            label_badge.configure(bg=BUTTON_BG)
+            label_badge.geometry(f"210x32+{rect.x + 12}+{rect.y + 12}")
+            label_badge.selected_hwnd = hwnd
+            label_badge.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            title = winapi.describe_window(hwnd)
+            if len(title) > 26:
+                title = title[:23] + "..."
+            label = tk.Label(
+                label_badge,
+                text=title,
+                bg=BUTTON_BG,
+                fg=TEXT_FG,
+                padx=8,
+                pady=4,
+            )
+            label.pack(fill="both", expand=True)
+            label.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            badges.append(badge)
+            badges.append(label_badge)
+
+        cancel_badge = tk.Toplevel(self.root)
+        cancel_badge.overrideredirect(True)
+        cancel_badge.attributes("-topmost", True)
+        cancel_badge.configure(bg=APP_BG)
+        cancel_badge.geometry(f"90x34+{area.x + area.width - 112}+{area.y + 22}")
+        ttk.Button(cancel_badge, text="Cancel", command=cancel).pack(fill="both", expand=True)
+        badges.append(cancel_badge)
+        self.refresh_labels("Comfort Dual: choose left panel")
+
+    def apply_dual_pair(self, left_hwnd: int, right_hwnd: int, area: Rect) -> None:
         left_rect, right_rect = dual_panes(area, self.active_dual_preset)
-        self.auto_snap_work_area = area
+        self.structured_windows.clear()
         moved = 0
         for hwnd, rect in ((left_hwnd, left_rect), (right_hwnd, right_rect)):
             if winapi.move_window(hwnd, rect):
                 self.structured_windows[hwnd] = rect
                 moved += 1
-        selector.destroy()
         self.refresh_labels(f"Comfort Dual: moved {moved} selected window(s)")
 
     def place_dual(self) -> None:
@@ -588,9 +586,9 @@ class ComfortWorkspaceApp:
             return
 
         area = self.work_area_for(target)
-        self.auto_snap_work_area = area
         windows = self.recent_windows_on_work_area(area, limit=2)
         left, right = dual_panes(area, self.active_dual_preset)
+        self.structured_windows.clear()
         moved = 0
         for hwnd, rect in zip(windows, (left, right), strict=False):
             if winapi.move_window(hwnd, rect):
@@ -602,7 +600,6 @@ class ComfortWorkspaceApp:
         hwnd = self.target_window()
         rect = self.reading_rect_for(hwnd)
         if hwnd:
-            self.auto_snap_work_area = self.work_area_for(hwnd)
             self.structured_windows[hwnd] = rect
         self.move_window_to(hwnd, rect, "Reading pane")
 
@@ -620,9 +617,6 @@ class ComfortWorkspaceApp:
             self.refresh_labels("Apple Float on")
         else:
             self.refresh_labels("Apple Float off")
-            hwnd = self.target_window()
-            if hwnd:
-                self.snap_window_if_needed(hwnd)
 
     def overlay_geometry(self, area: Rect | None = None) -> str:
         area = area or self.work_area_for(self.target_window())
@@ -695,6 +689,17 @@ class ComfortWorkspaceApp:
 
     def reload_config(self) -> None:
         self.load_or_reload_config(startup=False)
+
+    def reset_view(self) -> None:
+        if not self.structured_windows:
+            self.place_dual()
+            return
+
+        moved = 0
+        for hwnd, rect in list(self.structured_windows.items()):
+            if winapi.move_window(hwnd, rect):
+                moved += 1
+        self.refresh_labels(f"Reset View: moved {moved} panel(s)")
 
     def quit(self) -> None:
         self.unregister_hotkeys()
