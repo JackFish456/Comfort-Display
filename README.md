@@ -18,7 +18,9 @@ You can also run it from PowerShell:
 python .\run_jack_display.py
 ```
 
-The control window can stay open in the corner while you work.
+The control window can stay open in the corner while you work. Closing or
+minimizing it hides it in the Windows system tray; click the tray icon to bring
+it back. Use the `Quit` button or `Ctrl+Alt+Q` to fully exit.
 
 ## Hotkeys
 
@@ -26,7 +28,7 @@ The control window can stay open in the corner while you work.
 - `Ctrl+Alt+2`: move the active window to the right centered pane.
 - `Ctrl+Alt+D`: move the two most recently observed eligible windows into both panes.
 - `Ctrl+Alt+C`: move the active window to a centered reading pane.
-- `Ctrl+Alt+A`: toggle Apple Float visual guides.
+- `Ctrl+Alt+A`: toggle Apple Float free movement.
 - `Ctrl+Alt+T`: toggle the warm dim overlay.
 - `Ctrl+Alt+Up`: increase overlay warmth/dimming.
 - `Ctrl+Alt+Down`: decrease overlay warmth/dimming.
@@ -35,17 +37,25 @@ The control window can stay open in the corner while you work.
 
 ## Modes
 
-`Comfort Dual` creates two centered virtual-monitor panes while leaving surrounding space free for Explorer, browser tabs, or reference windows.
+`Comfort Dual` creates two virtual-monitor panes on the target display. It only
+arranges windows that are already on that same display, so it will not pull a
+laptop-screen window onto the TV. After Comfort Dual is selected, manually moved
+windows on that display snap back into the nearest pane unless Apple Float is on.
+Clicking the `Comfort Dual` button opens a selector so you can choose the exact
+left and right panel windows; the hotkey keeps using the recent-window shortcut.
 
-`Apple Float` adds subtle visual guides. It only moves windows when you press a hotkey or button.
+`Apple Float` temporarily allows free-form window placement on the target
+display. It does not add a visual overlay.
 
-If Windows blocks click-through overlay behavior, the warm overlay or Apple Float guide can be dismissed by clicking it or pressing `Escape`.
+If Windows blocks click-through overlay behavior, the warm overlay can be
+dismissed by clicking it or pressing `Escape`.
 
 If Windows refuses to move a protected, elevated, or otherwise restricted window, the status line reports it as `blocked` and leaves the window alone.
 
 ## Configuration
 
-Edit `comfort_layout.json` to tune margins, gap, overlay strength, and Apple Float guide opacity. Press `Ctrl+Alt+R` after editing to reload.
+Edit `comfort_layout.json` to tune margins, gap, and overlay strength. Press
+`Ctrl+Alt+R` after editing to reload.
 
 ## Verify
 

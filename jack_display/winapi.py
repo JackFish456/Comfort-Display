@@ -97,6 +97,19 @@ def get_window_work_area(hwnd: int | None) -> Rect:
     return get_work_area()
 
 
+def get_window_rect(hwnd: int) -> Rect:
+    """Return the current top-level window rectangle."""
+
+    if HAS_PYWIN32:
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        return Rect(left, top, right - left, bottom - top)
+
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        raise OSError("GetWindowRect failed")
+    return Rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+
+
 def monitor_work_area(monitor: int) -> Rect:
     """Return a monitor work area from a Win32 monitor handle."""
 

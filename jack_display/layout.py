@@ -17,16 +17,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_alpha": 0.04,
         "max_alpha": 0.35,
     },
-    "apple_float": {
-        "guide_alpha": 0.22,
-    },
     "presets": {
         "comfort_dual": {
             "name": "Comfort Dual",
-            "side_margin_ratio": 0.06,
+            "side_margin_ratio": 0.0,
             "top_margin_ratio": 0.20,
             "bottom_margin_ratio": 0.20,
-            "gap": 36,
+            "gap": 0,
         },
         "tall_dual": {
             "name": "Tall Dual",
@@ -117,5 +114,3 @@ def reading_pane(work_area: Rect, preset: dict[str, Any]) -> Rect:
     x = work_area.x + ((work_area.width - width) // 2)
     y = work_area.y + ((work_area.height - height) // 2)
     return Rect(x, y, width, height)
-
-

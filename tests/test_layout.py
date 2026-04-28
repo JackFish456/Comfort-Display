@@ -16,12 +16,12 @@ class LayoutTests(unittest.TestCase):
         self.work_area = Rect(0, 0, 1920, 1152)
         self.config = DEFAULT_CONFIG
 
-    def test_comfort_dual_centers_two_non_overlapping_panes(self) -> None:
+    def test_comfort_dual_maximizes_horizontal_space(self) -> None:
         left, right = dual_panes(self.work_area, self.config["presets"]["comfort_dual"])
 
-        self.assertEqual(left.as_tuple(), (115, 230, 827, 692))
-        self.assertEqual(right.as_tuple(), (978, 230, 827, 692))
-        self.assertEqual(right.x - left.right, 36)
+        self.assertEqual(left.as_tuple(), (0, 230, 960, 692))
+        self.assertEqual(right.as_tuple(), (960, 230, 960, 692))
+        self.assertEqual(right.x - left.right, 0)
 
     def test_reading_pane_is_centered(self) -> None:
         rect = reading_pane(self.work_area, self.config["presets"]["single_reading"])
@@ -39,7 +39,6 @@ class LayoutTests(unittest.TestCase):
         config = load_config(Path("comfort_layout.json"))
 
         self.assertIn("overlay", config)
-        self.assertIn("apple_float", config)
 
 
 if __name__ == "__main__":

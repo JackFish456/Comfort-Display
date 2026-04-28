@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
@@ -22,7 +23,25 @@ from . import winapi
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 WM_HOTKEY = 0x0312
+WM_TRAYICON = 0x8001
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONUP = 0x0205
 PM_REMOVE = 0x0001
+GWLP_WNDPROC = -4
+NIM_ADD = 0x00000000
+NIM_DELETE = 0x00000002
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+IDI_APPLICATION = 32512
+TRAY_ICON_ID = 1
+APP_BG = "#f1e9ff"
+PANEL_BG = "#eadfff"
+BUTTON_BG = "#ded0ff"
+BUTTON_ACTIVE_BG = "#d2c0ff"
+TEXT_FG = "#241b35"
+SNAP_TOLERANCE = 16
 
 VK = {
     "1": 0x31,
@@ -64,6 +83,28 @@ class MSG(ctypes.Structure):
 
 
 user32 = ctypes.windll.user32
+shell32 = ctypes.windll.shell32
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HICON),
+        ("szTip", wintypes.WCHAR * 128),
+    ]
+
+
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
 
 
 class ComfortWorkspaceApp:
@@ -78,25 +119,31 @@ class ComfortWorkspaceApp:
         self.overlay_enabled = False
         self.overlay_alpha = float(DEFAULT_CONFIG["overlay"]["alpha"])
         self.overlay: tk.Toplevel | None = None
-        self.guide: tk.Toplevel | None = None
         self.hotkey_failures: list[str] = []
         self.last_active_hwnd: int | None = None
         self.active_history: list[int] = []
+        self.auto_snap_work_area: Rect | None = None
+        self.auto_snapping_hwnd: int | None = None
+        self.structured_windows: dict[int, Rect] = {}
+        self.tray_added = False
+        self.tray_hwnd: int | None = None
+        self.tray_old_wndproc: int | None = None
+        self.tray_wndproc: WNDPROC | None = None
 
         self.status_var = tk.StringVar()
         self.mode_var = tk.StringVar()
         self.screen_var = tk.StringVar()
         self.overlay_var = tk.StringVar()
-        self.overlay_scale_var = tk.DoubleVar(value=self.overlay_alpha)
-        self.overlay_scale: ttk.Scale | None = None
-
         self.root.title("Jack Display Comfort Workspace")
-        self.root.geometry("390x420")
+        self.root.geometry("")
+        self.root.configure(bg=APP_BG)
         self.root.resizable(False, False)
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        self.root.bind("<Unmap>", self.hide_to_tray_on_minimize)
 
         self.load_or_reload_config(startup=True)
         self.build_ui()
+        self.setup_tray_icon()
         self.register_hotkeys()
         self.refresh_labels("Ready")
         self.root.after(50, self.poll_hotkeys)
@@ -111,84 +158,144 @@ class ComfortWorkspaceApp:
     def reading_preset(self) -> dict[str, Any]:
         return self.config["presets"]["single_reading"]
 
+    def configure_styles(self) -> None:
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(".", background=APP_BG, foreground=TEXT_FG, font=("Segoe UI", 9))
+        style.configure("TFrame", background=APP_BG)
+        style.configure("TLabel", background=APP_BG, foreground=TEXT_FG)
+        style.configure("TButton", background=BUTTON_BG, foreground=TEXT_FG, padding=(8, 4))
+        style.map("TButton", background=[("active", BUTTON_ACTIVE_BG)])
+
     def build_ui(self) -> None:
-        pad = {"padx": 14, "pady": 7}
-        header = ttk.Label(
-            self.root,
-            text="Jack Display Comfort Workspace",
-            font=("Segoe UI", 14, "bold"),
-        )
-        header.pack(pady=(14, 4))
-
-        ttk.Label(self.root, textvariable=self.screen_var).pack()
-        ttk.Label(self.root, textvariable=self.mode_var).pack()
-        ttk.Label(self.root, textvariable=self.overlay_var).pack()
-
+        self.configure_styles()
+        pad = {"padx": 6, "pady": 3}
         frame = ttk.Frame(self.root)
-        frame.pack(fill="x", pady=(10, 4))
-        ttk.Button(frame, text="Left Pane", command=self.place_left).grid(row=0, column=0, **pad)
-        ttk.Button(frame, text="Right Pane", command=self.place_right).grid(row=0, column=1, **pad)
-        ttk.Button(frame, text="Comfort Dual", command=self.place_dual).grid(row=1, column=0, **pad)
-        ttk.Button(frame, text="Reading Pane", command=self.place_reading).grid(row=1, column=1, **pad)
-        ttk.Button(frame, text="Apple Float", command=self.toggle_apple).grid(row=2, column=0, **pad)
-        ttk.Button(frame, text="Warm Overlay", command=self.toggle_overlay).grid(row=3, column=0, **pad)
-        ttk.Button(frame, text="Reload Config", command=self.reload_config).grid(row=3, column=1, **pad)
+        frame.pack(padx=8, pady=8)
+        ttk.Button(frame, text="Comfort Dual", command=self.open_dual_selector).grid(row=0, column=0, **pad)
+        ttk.Button(frame, text="Reading Pane", command=self.place_reading).grid(row=0, column=1, **pad)
+        ttk.Button(frame, text="Apple Float", command=self.toggle_apple).grid(row=1, column=0, **pad)
+        ttk.Button(frame, text="Reload Config", command=self.reload_config).grid(row=1, column=1, **pad)
+        ttk.Button(frame, text="Quit", command=self.quit).grid(row=2, column=0, columnspan=2, **pad)
 
-        controls = ttk.Frame(self.root)
-        controls.pack(fill="x", pady=(4, 8))
-        ttk.Button(controls, text="-", width=3, command=self.overlay_down).grid(
-            row=0,
-            column=0,
-            padx=(14, 6),
-            pady=7,
-        )
-        self.overlay_scale = ttk.Scale(
-            controls,
-            from_=float(self.config["overlay"]["min_alpha"]),
-            to=float(self.config["overlay"]["max_alpha"]),
-            variable=self.overlay_scale_var,
-            command=self.overlay_slider_changed,
-            length=210,
-        )
-        self.overlay_scale.grid(row=0, column=1, padx=4, pady=7)
-        ttk.Button(controls, text="+", width=3, command=self.overlay_up).grid(
-            row=0,
-            column=2,
-            padx=(6, 14),
-            pady=7,
-        )
-        ttk.Button(controls, text="Quit", command=self.quit).grid(row=1, column=0, columnspan=3, **pad)
+    def setup_tray_icon(self) -> None:
+        self.root.update_idletasks()
+        hwnd = int(self.root.winfo_id())
+        self.tray_hwnd = hwnd
+        self.tray_wndproc = WNDPROC(self.tray_window_proc)
 
-        ttk.Separator(self.root).pack(fill="x", padx=14, pady=(4, 8))
-        ttk.Label(
-            self.root,
-            text="Hotkeys: Ctrl+Alt+1/2/D/C/A/T/Up/Down/R/Q",
-            wraplength=350,
-        ).pack()
-        ttk.Label(self.root, textvariable=self.status_var, wraplength=350).pack(pady=(8, 0))
+        if hasattr(user32, "SetWindowLongPtrW"):
+            set_window_proc = user32.SetWindowLongPtrW
+        else:
+            set_window_proc = user32.SetWindowLongW
+        set_window_proc.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        set_window_proc.restype = ctypes.c_void_p
+        user32.CallWindowProcW.argtypes = [
+            ctypes.c_void_p,
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.CallWindowProcW.restype = ctypes.c_ssize_t
+        user32.DefWindowProcW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.DefWindowProcW.restype = ctypes.c_ssize_t
+        user32.LoadIconW.restype = wintypes.HICON
+        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+        self.tray_old_wndproc = int(
+            set_window_proc(
+                wintypes.HWND(hwnd),
+                GWLP_WNDPROC,
+                ctypes.cast(self.tray_wndproc, ctypes.c_void_p).value,
+            )
+            or 0
+        )
+
+        icon = user32.LoadIconW(None, IDI_APPLICATION)
+        data = NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        data.hWnd = wintypes.HWND(hwnd)
+        data.uID = TRAY_ICON_ID
+        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        data.uCallbackMessage = WM_TRAYICON
+        data.hIcon = icon
+        data.szTip = "Jack Display Comfort Workspace"
+        self.tray_added = bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)))
+
+    def tray_window_proc(
+        self,
+        hwnd: int,
+        message: int,
+        wparam: int,
+        lparam: int,
+    ) -> int:
+        if message == WM_TRAYICON and int(wparam) == TRAY_ICON_ID:
+            if int(lparam) in {WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP}:
+                self.root.after(0, self.show_from_tray)
+                return 0
+
+        if self.tray_old_wndproc:
+            return int(
+                user32.CallWindowProcW(
+                    ctypes.c_void_p(self.tray_old_wndproc),
+                    wintypes.HWND(hwnd),
+                    message,
+                    wparam,
+                    lparam,
+                )
+            )
+        return int(user32.DefWindowProcW(wintypes.HWND(hwnd), message, wparam, lparam))
+
+    def hide_to_tray_on_minimize(self, event: tk.Event) -> None:
+        if event.widget is self.root and self.root.state() == "iconic":
+            self.hide_to_tray()
+
+    def hide_to_tray(self) -> None:
+        if self.tray_added:
+            self.root.withdraw()
+        else:
+            self.root.iconify()
+
+    def show_from_tray(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.refresh_labels("Restored from tray")
+
+    def remove_tray_icon(self) -> None:
+        if not self.tray_added or self.tray_hwnd is None:
+            return
+        data = NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        data.hWnd = wintypes.HWND(self.tray_hwnd)
+        data.uID = TRAY_ICON_ID
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+        self.tray_added = False
 
     def load_or_reload_config(self, startup: bool = False) -> None:
         try:
             self.config = load_config(self.config_path)
             self.overlay_alpha = float(self.config["overlay"]["alpha"])
-            self.overlay_scale_var.set(self.overlay_alpha)
             message = "Config loaded" if startup else "Config reloaded"
         except Exception as exc:
             self.config = DEFAULT_CONFIG
             self.overlay_alpha = float(DEFAULT_CONFIG["overlay"]["alpha"])
-            self.overlay_scale_var.set(self.overlay_alpha)
             message = f"Using defaults; config issue: {exc}"
-        if self.overlay_scale is not None:
-            self.overlay_scale.configure(
-                from_=float(self.config["overlay"]["min_alpha"]),
-                to=float(self.config["overlay"]["max_alpha"]),
-            )
         self.work_area = winapi.get_work_area()
         self.refresh_labels(message)
         if self.overlay_enabled:
             self.show_overlay()
-        if self.apple_enabled:
-            self.show_guide()
 
     def refresh_labels(self, status: str | None = None) -> None:
         self.screen_var.set(
@@ -228,6 +335,7 @@ class ComfortWorkspaceApp:
         if hwnd:
             self.last_active_hwnd = hwnd
             self.remember_window(hwnd)
+            self.snap_window_if_needed(hwnd)
         self.root.after(100, self.observe_active_window)
 
     def remember_window(self, hwnd: int) -> None:
@@ -249,6 +357,49 @@ class ComfortWorkspaceApp:
                 return recent
         return recent
 
+    def recent_windows_on_work_area(self, work_area: Rect, limit: int = 2) -> list[int]:
+        recent: list[int] = []
+
+        def add_if_same_monitor(hwnd: int) -> bool:
+            if hwnd in recent or not winapi.is_eligible_window(hwnd):
+                return False
+            try:
+                if winapi.get_window_work_area(hwnd) != work_area:
+                    return False
+            except Exception:
+                return False
+            recent.append(hwnd)
+            return len(recent) >= limit
+
+        for hwnd in self.active_history:
+            if add_if_same_monitor(hwnd):
+                return recent
+        for hwnd in winapi.eligible_windows():
+            if add_if_same_monitor(hwnd):
+                return recent
+        return recent
+
+    def windows_on_work_area(self, work_area: Rect) -> list[int]:
+        windows: list[int] = []
+        for hwnd in self.active_history + winapi.eligible_windows():
+            if hwnd in windows or not winapi.is_eligible_window(hwnd):
+                continue
+            try:
+                if winapi.get_window_work_area(hwnd) == work_area:
+                    windows.append(hwnd)
+            except Exception:
+                continue
+        return windows
+
+    def window_choice_labels(self, windows: list[int]) -> dict[str, int]:
+        labels: dict[str, int] = {}
+        for index, hwnd in enumerate(windows, start=1):
+            title = winapi.describe_window(hwnd)
+            if len(title) > 44:
+                title = title[:41] + "..."
+            labels[f"{index}. {title}"] = hwnd
+        return labels
+
     def dual_rects(self) -> tuple[Rect, Rect]:
         return dual_panes(self.work_area, self.active_dual_preset)
 
@@ -263,6 +414,49 @@ class ComfortWorkspaceApp:
             return winapi.get_window_work_area(hwnd)
         except Exception:
             return self.work_area
+
+    def snap_window_if_needed(self, hwnd: int) -> None:
+        if self.apple_enabled or self.auto_snap_work_area is None:
+            return
+        if hwnd == self.auto_snapping_hwnd:
+            return
+        try:
+            if winapi.get_window_work_area(hwnd) != self.auto_snap_work_area:
+                return
+            current = winapi.get_window_rect(hwnd)
+        except Exception:
+            return
+
+        structured_rect = self.structured_windows.get(hwnd)
+        if structured_rect is not None:
+            if self.rects_close(current, structured_rect):
+                return
+            self.structured_windows.pop(hwnd, None)
+
+        left, right = dual_panes(self.auto_snap_work_area, self.active_dual_preset)
+        if self.rects_close(current, left) or self.rects_close(current, right):
+            return
+
+        target = self.nearest_pane(current, left, right)
+        self.auto_snapping_hwnd = hwnd
+        try:
+            winapi.move_window(hwnd, target)
+        finally:
+            self.auto_snapping_hwnd = None
+
+    def rects_close(self, first: Rect, second: Rect) -> bool:
+        return (
+            abs(first.x - second.x) <= SNAP_TOLERANCE
+            and abs(first.y - second.y) <= SNAP_TOLERANCE
+            and abs(first.width - second.width) <= SNAP_TOLERANCE
+            and abs(first.height - second.height) <= SNAP_TOLERANCE
+        )
+
+    def nearest_pane(self, current: Rect, left: Rect, right: Rect) -> Rect:
+        current_center = current.x + (current.width // 2)
+        left_center = left.x + (left.width // 2)
+        right_center = right.x + (right.width // 2)
+        return left if abs(current_center - left_center) <= abs(current_center - right_center) else right
 
     def move_active_to(self, rect: Rect, label: str) -> None:
         hwnd = self.target_window()
@@ -285,26 +479,131 @@ class ComfortWorkspaceApp:
     def place_left(self) -> None:
         hwnd = self.target_window()
         left, _ = self.dual_rects_for(hwnd)
+        if hwnd:
+            self.auto_snap_work_area = self.work_area_for(hwnd)
+            self.structured_windows[hwnd] = left
         self.move_window_to(hwnd, left, "Left pane")
 
     def place_right(self) -> None:
         hwnd = self.target_window()
         _, right = self.dual_rects_for(hwnd)
+        if hwnd:
+            self.auto_snap_work_area = self.work_area_for(hwnd)
+            self.structured_windows[hwnd] = right
         self.move_window_to(hwnd, right, "Right pane")
 
+    def open_dual_selector(self) -> None:
+        target = self.target_window()
+        if not target:
+            self.refresh_labels("Comfort Dual: no eligible target window")
+            return
+
+        area = self.work_area_for(target)
+        windows = self.windows_on_work_area(area)
+        labels = self.window_choice_labels(windows)
+        if len(labels) < 2:
+            self.place_dual()
+            return
+
+        selector = tk.Toplevel(self.root)
+        selector.title("Choose Dual Panels")
+        selector.configure(bg=APP_BG)
+        selector.resizable(False, False)
+        selector.transient(self.root)
+        selector.attributes("-topmost", True)
+
+        frame = ttk.Frame(selector)
+        frame.pack(padx=10, pady=10)
+        choices = list(labels.keys())
+        defaults = self.recent_windows_on_work_area(area, limit=2)
+        default_labels = [
+            label
+            for label, hwnd in labels.items()
+            if hwnd in defaults
+        ]
+
+        ttk.Label(frame, text="Left").grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        left_var = tk.StringVar(value=default_labels[0] if default_labels else choices[0])
+        left_box = ttk.Combobox(frame, textvariable=left_var, values=choices, state="readonly", width=42)
+        left_box.grid(row=1, column=0, padx=4, pady=(0, 6))
+
+        ttk.Label(frame, text="Right").grid(row=2, column=0, sticky="w", padx=4, pady=(0, 2))
+        fallback_right = choices[1] if len(choices) > 1 else choices[0]
+        right_var = tk.StringVar(value=default_labels[1] if len(default_labels) > 1 else fallback_right)
+        right_box = ttk.Combobox(frame, textvariable=right_var, values=choices, state="readonly", width=42)
+        right_box.grid(row=3, column=0, padx=4, pady=(0, 8))
+
+        message_var = tk.StringVar()
+        ttk.Label(frame, textvariable=message_var).grid(row=4, column=0, padx=4, pady=(0, 6))
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=5, column=0)
+        ttk.Button(
+            actions,
+            text="Apply",
+            command=lambda: self.apply_dual_selection(
+                selector,
+                labels,
+                left_var.get(),
+                right_var.get(),
+                area,
+                message_var,
+            ),
+        ).grid(row=0, column=0, padx=4)
+        ttk.Button(actions, text="Cancel", command=selector.destroy).grid(row=0, column=1, padx=4)
+        left_box.focus_set()
+
+    def apply_dual_selection(
+        self,
+        selector: tk.Toplevel,
+        labels: dict[str, int],
+        left_label: str,
+        right_label: str,
+        area: Rect,
+        message_var: tk.StringVar,
+    ) -> None:
+        left_hwnd = labels.get(left_label)
+        right_hwnd = labels.get(right_label)
+        if not left_hwnd or not right_hwnd:
+            message_var.set("Choose two windows.")
+            return
+        if left_hwnd == right_hwnd:
+            message_var.set("Choose different windows.")
+            return
+
+        left_rect, right_rect = dual_panes(area, self.active_dual_preset)
+        self.auto_snap_work_area = area
+        moved = 0
+        for hwnd, rect in ((left_hwnd, left_rect), (right_hwnd, right_rect)):
+            if winapi.move_window(hwnd, rect):
+                self.structured_windows[hwnd] = rect
+                moved += 1
+        selector.destroy()
+        self.refresh_labels(f"Comfort Dual: moved {moved} selected window(s)")
+
     def place_dual(self) -> None:
-        windows = self.recent_windows(limit=2)
-        area = self.work_area_for(windows[0] if windows else None)
+        target = self.target_window()
+        if not target:
+            self.refresh_labels("Comfort Dual: no eligible target window")
+            return
+
+        area = self.work_area_for(target)
+        self.auto_snap_work_area = area
+        windows = self.recent_windows_on_work_area(area, limit=2)
         left, right = dual_panes(area, self.active_dual_preset)
         moved = 0
         for hwnd, rect in zip(windows, (left, right), strict=False):
             if winapi.move_window(hwnd, rect):
+                self.structured_windows[hwnd] = rect
                 moved += 1
         self.refresh_labels(f"Comfort Dual: moved {moved} window(s)")
 
     def place_reading(self) -> None:
         hwnd = self.target_window()
         rect = self.reading_rect_for(hwnd)
+        if hwnd:
+            self.auto_snap_work_area = self.work_area_for(hwnd)
+            self.structured_windows[hwnd] = rect
         self.move_window_to(hwnd, rect, "Reading pane")
 
     def move_window_to(self, hwnd: int | None, rect: Rect, label: str) -> None:
@@ -318,11 +617,12 @@ class ComfortWorkspaceApp:
     def toggle_apple(self) -> None:
         self.apple_enabled = not self.apple_enabled
         if self.apple_enabled:
-            self.show_guide()
             self.refresh_labels("Apple Float on")
         else:
-            self.hide_guide()
             self.refresh_labels("Apple Float off")
+            hwnd = self.target_window()
+            if hwnd:
+                self.snap_window_if_needed(hwnd)
 
     def overlay_geometry(self, area: Rect | None = None) -> str:
         area = area or self.work_area_for(self.target_window())
@@ -330,6 +630,11 @@ class ComfortWorkspaceApp:
             f"{area.width}x{area.height}"
             f"+{area.x}+{area.y}"
         )
+
+    def apply_overlay_alpha(self) -> None:
+        if self.overlay is None or not self.overlay.winfo_exists():
+            return
+        self.overlay.attributes("-alpha", self.overlay_alpha)
 
     def show_overlay(self) -> None:
         area = self.work_area_for(self.target_window())
@@ -346,7 +651,7 @@ class ComfortWorkspaceApp:
             if not winapi.set_click_through(self.overlay.winfo_id()):
                 self.overlay.focus_force()
                 self.refresh_labels("Overlay fallback: click it or press Escape to dismiss")
-        self.overlay.attributes("-alpha", self.overlay_alpha)
+        self.apply_overlay_alpha()
         self.overlay.deiconify()
 
     def hide_overlay(self) -> None:
@@ -368,9 +673,11 @@ class ComfortWorkspaceApp:
             float(overlay["max_alpha"]),
             self.overlay_alpha + float(overlay["step"]),
         )
-        self.overlay_scale_var.set(self.overlay_alpha)
         if self.overlay_enabled:
-            self.show_overlay()
+            if self.overlay is None or not self.overlay.winfo_exists():
+                self.show_overlay()
+            else:
+                self.apply_overlay_alpha()
         self.refresh_labels("Warm overlay increased")
 
     def overlay_down(self) -> None:
@@ -379,73 +686,12 @@ class ComfortWorkspaceApp:
             float(overlay["min_alpha"]),
             self.overlay_alpha - float(overlay["step"]),
         )
-        self.overlay_scale_var.set(self.overlay_alpha)
         if self.overlay_enabled:
-            self.show_overlay()
+            if self.overlay is None or not self.overlay.winfo_exists():
+                self.show_overlay()
+            else:
+                self.apply_overlay_alpha()
         self.refresh_labels("Warm overlay decreased")
-
-    def overlay_slider_changed(self, value: str) -> None:
-        self.overlay_alpha = float(value)
-        if self.overlay_enabled:
-            self.show_overlay()
-        self.refresh_labels("Warm overlay adjusted")
-
-    def show_guide(self) -> None:
-        area = self.work_area_for(self.target_window())
-        if self.guide is not None and self.guide.winfo_exists():
-            self.guide.destroy()
-
-        self.guide = tk.Toplevel(self.root)
-        self.guide.overrideredirect(True)
-        self.guide.attributes("-topmost", True)
-        self.guide.attributes("-alpha", float(self.config["apple_float"]["guide_alpha"]))
-        self.guide.configure(bg="#101820")
-        self.guide.geometry(self.overlay_geometry(area))
-        canvas = tk.Canvas(
-            self.guide,
-            width=area.width,
-            height=area.height,
-            highlightthickness=0,
-            bg="#101820",
-        )
-        canvas.pack(fill="both", expand=True)
-        self.guide.bind("<Button-1>", lambda _event: self.toggle_apple())
-        self.guide.bind("<Escape>", lambda _event: self.toggle_apple())
-        canvas.bind("<Button-1>", lambda _event: self.toggle_apple())
-
-        left, right = dual_panes(area, self.active_dual_preset)
-        reading = reading_pane(area, self.reading_preset)
-        for rect, label, color in (
-            (left, "left", "#9be7ff"),
-            (right, "right", "#9be7ff"),
-            (reading, "reading", "#ffd28a"),
-        ):
-            canvas.create_rectangle(
-                rect.x - area.x,
-                rect.y - area.y,
-                rect.right - area.x,
-                rect.bottom - area.y,
-                outline=color,
-                width=4,
-            )
-            canvas.create_text(
-                rect.x - area.x + 18,
-                rect.y - area.y + 18,
-                anchor="nw",
-                text=label,
-                fill=color,
-                font=("Segoe UI", 18, "bold"),
-            )
-
-        self.guide.update_idletasks()
-        if not winapi.set_click_through(self.guide.winfo_id()):
-            self.guide.focus_force()
-            self.refresh_labels("Guide fallback: click it or press Escape to dismiss")
-
-    def hide_guide(self) -> None:
-        if self.guide is not None and self.guide.winfo_exists():
-            self.guide.destroy()
-        self.guide = None
 
     def reload_config(self) -> None:
         self.load_or_reload_config(startup=False)
@@ -453,7 +699,7 @@ class ComfortWorkspaceApp:
     def quit(self) -> None:
         self.unregister_hotkeys()
         self.hide_overlay()
-        self.hide_guide()
+        self.remove_tray_icon()
         self.root.destroy()
 
 
