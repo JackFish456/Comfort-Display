@@ -14,7 +14,6 @@ from .layout import (
     Rect,
     dual_panes,
     load_config,
-    named_position,
     reading_pane,
 )
 from . import winapi
@@ -34,7 +33,6 @@ VK = {
     "Q": 0x51,
     "R": 0x52,
     "T": 0x54,
-    "SPACE": 0x20,
     "UP": 0x26,
     "DOWN": 0x28,
 }
@@ -45,12 +43,11 @@ HOTKEYS = {
     3: ("Ctrl+Alt+D", VK["D"], "place_dual"),
     4: ("Ctrl+Alt+C", VK["C"], "place_reading"),
     5: ("Ctrl+Alt+A", VK["A"], "toggle_apple"),
-    6: ("Ctrl+Alt+Space", VK["SPACE"], "cycle_apple"),
-    7: ("Ctrl+Alt+T", VK["T"], "toggle_overlay"),
-    8: ("Ctrl+Alt+Up", VK["UP"], "overlay_up"),
-    9: ("Ctrl+Alt+Down", VK["DOWN"], "overlay_down"),
-    10: ("Ctrl+Alt+R", VK["R"], "reload_config"),
-    11: ("Ctrl+Alt+Q", VK["Q"], "quit"),
+    6: ("Ctrl+Alt+T", VK["T"], "toggle_overlay"),
+    7: ("Ctrl+Alt+Up", VK["UP"], "overlay_up"),
+    8: ("Ctrl+Alt+Down", VK["DOWN"], "overlay_down"),
+    9: ("Ctrl+Alt+R", VK["R"], "reload_config"),
+    10: ("Ctrl+Alt+Q", VK["Q"], "quit"),
 }
 
 
@@ -83,7 +80,6 @@ class ComfortWorkspaceApp:
         self.overlay: tk.Toplevel | None = None
         self.guide: tk.Toplevel | None = None
         self.hotkey_failures: list[str] = []
-        self.apple_cycle_by_hwnd: dict[int, int] = {}
         self.last_active_hwnd: int | None = None
         self.active_history: list[int] = []
 
@@ -91,6 +87,8 @@ class ComfortWorkspaceApp:
         self.mode_var = tk.StringVar()
         self.screen_var = tk.StringVar()
         self.overlay_var = tk.StringVar()
+        self.overlay_scale_var = tk.DoubleVar(value=self.overlay_alpha)
+        self.overlay_scale: ttk.Scale | None = None
 
         self.root.title("Jack Display Comfort Workspace")
         self.root.geometry("390x420")
@@ -133,20 +131,38 @@ class ComfortWorkspaceApp:
         ttk.Button(frame, text="Comfort Dual", command=self.place_dual).grid(row=1, column=0, **pad)
         ttk.Button(frame, text="Reading Pane", command=self.place_reading).grid(row=1, column=1, **pad)
         ttk.Button(frame, text="Apple Float", command=self.toggle_apple).grid(row=2, column=0, **pad)
-        ttk.Button(frame, text="Cycle Float", command=self.cycle_apple).grid(row=2, column=1, **pad)
         ttk.Button(frame, text="Warm Overlay", command=self.toggle_overlay).grid(row=3, column=0, **pad)
         ttk.Button(frame, text="Reload Config", command=self.reload_config).grid(row=3, column=1, **pad)
 
         controls = ttk.Frame(self.root)
         controls.pack(fill="x", pady=(4, 8))
-        ttk.Button(controls, text="Warmer", command=self.overlay_up).grid(row=0, column=0, **pad)
-        ttk.Button(controls, text="Cooler", command=self.overlay_down).grid(row=0, column=1, **pad)
-        ttk.Button(controls, text="Quit", command=self.quit).grid(row=1, column=0, columnspan=2, **pad)
+        ttk.Button(controls, text="-", width=3, command=self.overlay_down).grid(
+            row=0,
+            column=0,
+            padx=(14, 6),
+            pady=7,
+        )
+        self.overlay_scale = ttk.Scale(
+            controls,
+            from_=float(self.config["overlay"]["min_alpha"]),
+            to=float(self.config["overlay"]["max_alpha"]),
+            variable=self.overlay_scale_var,
+            command=self.overlay_slider_changed,
+            length=210,
+        )
+        self.overlay_scale.grid(row=0, column=1, padx=4, pady=7)
+        ttk.Button(controls, text="+", width=3, command=self.overlay_up).grid(
+            row=0,
+            column=2,
+            padx=(6, 14),
+            pady=7,
+        )
+        ttk.Button(controls, text="Quit", command=self.quit).grid(row=1, column=0, columnspan=3, **pad)
 
         ttk.Separator(self.root).pack(fill="x", padx=14, pady=(4, 8))
         ttk.Label(
             self.root,
-            text="Hotkeys: Ctrl+Alt+1/2/D/C/A/Space/T/Up/Down/R/Q",
+            text="Hotkeys: Ctrl+Alt+1/2/D/C/A/T/Up/Down/R/Q",
             wraplength=350,
         ).pack()
         ttk.Label(self.root, textvariable=self.status_var, wraplength=350).pack(pady=(8, 0))
@@ -155,10 +171,18 @@ class ComfortWorkspaceApp:
         try:
             self.config = load_config(self.config_path)
             self.overlay_alpha = float(self.config["overlay"]["alpha"])
+            self.overlay_scale_var.set(self.overlay_alpha)
             message = "Config loaded" if startup else "Config reloaded"
         except Exception as exc:
             self.config = DEFAULT_CONFIG
+            self.overlay_alpha = float(DEFAULT_CONFIG["overlay"]["alpha"])
+            self.overlay_scale_var.set(self.overlay_alpha)
             message = f"Using defaults; config issue: {exc}"
+        if self.overlay_scale is not None:
+            self.overlay_scale.configure(
+                from_=float(self.config["overlay"]["min_alpha"]),
+                to=float(self.config["overlay"]["max_alpha"]),
+            )
         self.work_area = winapi.get_work_area()
         self.refresh_labels(message)
         if self.overlay_enabled:
@@ -295,36 +319,10 @@ class ComfortWorkspaceApp:
         self.apple_enabled = not self.apple_enabled
         if self.apple_enabled:
             self.show_guide()
-            self.refresh_labels("Apple Float on: Ctrl+Alt+Space cycles soft positions")
+            self.refresh_labels("Apple Float on")
         else:
             self.hide_guide()
             self.refresh_labels("Apple Float off")
-
-    def cycle_apple(self) -> None:
-        if not self.apple_enabled:
-            self.refresh_labels("Apple Float is off; press Ctrl+Alt+A first")
-            return
-
-        hwnd = self.target_window()
-        if not hwnd:
-            self.refresh_labels("Apple Float: no eligible active window")
-            return
-
-        positions = list(self.config["apple_float"].get("cycle_positions") or [])
-        if not positions:
-            positions = list(DEFAULT_CONFIG["apple_float"]["cycle_positions"])
-        index = self.apple_cycle_by_hwnd.get(hwnd, -1) + 1
-        position = positions[index % len(positions)]
-        self.apple_cycle_by_hwnd[hwnd] = index
-        rect = named_position(
-            position,
-            self.work_area_for(hwnd),
-            self.active_dual_preset,
-            self.reading_preset,
-        )
-        moved = winapi.move_window(hwnd, rect)
-        title = winapi.describe_window(hwnd)
-        self.refresh_labels(f"Apple Float {position}: {'moved' if moved else 'blocked'} - {title}")
 
     def overlay_geometry(self, area: Rect | None = None) -> str:
         area = area or self.work_area_for(self.target_window())
@@ -370,6 +368,7 @@ class ComfortWorkspaceApp:
             float(overlay["max_alpha"]),
             self.overlay_alpha + float(overlay["step"]),
         )
+        self.overlay_scale_var.set(self.overlay_alpha)
         if self.overlay_enabled:
             self.show_overlay()
         self.refresh_labels("Warm overlay increased")
@@ -380,9 +379,16 @@ class ComfortWorkspaceApp:
             float(overlay["min_alpha"]),
             self.overlay_alpha - float(overlay["step"]),
         )
+        self.overlay_scale_var.set(self.overlay_alpha)
         if self.overlay_enabled:
             self.show_overlay()
         self.refresh_labels("Warm overlay decreased")
+
+    def overlay_slider_changed(self, value: str) -> None:
+        self.overlay_alpha = float(value)
+        if self.overlay_enabled:
+            self.show_overlay()
+        self.refresh_labels("Warm overlay adjusted")
 
     def show_guide(self) -> None:
         area = self.work_area_for(self.target_window())

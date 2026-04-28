@@ -8,16 +8,15 @@
     "max_alpha": 0.35
   },
   "apple_float": {
-    "guide_alpha": 0.22,
-    "cycle_positions": ["left", "right", "reading", "float"]
+    "guide_alpha": 0.22
   },
   "presets": {
     "comfort_dual": {
       "name": "Comfort Dual",
-      "side_margin_ratio": 0.10,
-      "top_margin_ratio": 0.08,
-      "bottom_margin_ratio": 0.07,
-      "gap": 24
+      "side_margin_ratio": 0.06,
+      "top_margin_ratio": 0.20,
+      "bottom_margin_ratio": 0.20,
+      "gap": 36
     },
     "tall_dual": {
       "name": "Tall Dual",

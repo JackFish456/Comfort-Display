@@ -19,15 +19,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "apple_float": {
         "guide_alpha": 0.22,
-        "cycle_positions": ["left", "right", "reading", "float"],
     },
     "presets": {
         "comfort_dual": {
             "name": "Comfort Dual",
-            "side_margin_ratio": 0.10,
-            "top_margin_ratio": 0.08,
-            "bottom_margin_ratio": 0.07,
-            "gap": 24,
+            "side_margin_ratio": 0.06,
+            "top_margin_ratio": 0.20,
+            "bottom_margin_ratio": 0.20,
+            "gap": 36,
         },
         "tall_dual": {
             "name": "Tall Dual",
@@ -120,32 +119,3 @@ def reading_pane(work_area: Rect, preset: dict[str, Any]) -> Rect:
     return Rect(x, y, width, height)
 
 
-def float_pane(work_area: Rect) -> Rect:
-    """Return a softer floating pane used by Apple Float cycling."""
-
-    width = round(work_area.width * 0.56)
-    height = round(work_area.height * 0.58)
-    x = work_area.x + round(work_area.width * 0.22)
-    y = work_area.y + round(work_area.height * 0.15)
-    return Rect(x, y, width, height)
-
-
-def named_position(
-    name: str,
-    work_area: Rect,
-    dual_preset: dict[str, Any],
-    reading_preset: dict[str, Any],
-) -> Rect:
-    """Resolve a named soft position into a rectangle."""
-
-    left, right = dual_panes(work_area, dual_preset)
-    normalized = name.strip().lower()
-    if normalized == "left":
-        return left
-    if normalized == "right":
-        return right
-    if normalized == "reading":
-        return reading_pane(work_area, reading_preset)
-    if normalized == "float":
-        return float_pane(work_area)
-    raise ValueError(f"Unknown position: {name}")

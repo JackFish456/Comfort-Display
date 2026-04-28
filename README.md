@@ -27,7 +27,6 @@ The control window can stay open in the corner while you work.
 - `Ctrl+Alt+D`: move the two most recently observed eligible windows into both panes.
 - `Ctrl+Alt+C`: move the active window to a centered reading pane.
 - `Ctrl+Alt+A`: toggle Apple Float visual guides.
-- `Ctrl+Alt+Space`: when Apple Float is on, cycle the active window through Apple Float positions.
 - `Ctrl+Alt+T`: toggle the warm dim overlay.
 - `Ctrl+Alt+Up`: increase overlay warmth/dimming.
 - `Ctrl+Alt+Down`: decrease overlay warmth/dimming.
@@ -38,7 +37,7 @@ The control window can stay open in the corner while you work.
 
 `Comfort Dual` creates two centered virtual-monitor panes while leaving surrounding space free for Explorer, browser tabs, or reference windows.
 
-`Apple Float` adds subtle visual guides and lets you cycle the active window through soft positions. It only moves windows when you press a hotkey or button.
+`Apple Float` adds subtle visual guides. It only moves windows when you press a hotkey or button.
 
 If Windows blocks click-through overlay behavior, the warm overlay or Apple Float guide can be dismissed by clicking it or pressing `Escape`.
 
@@ -46,7 +45,7 @@ If Windows refuses to move a protected, elevated, or otherwise restricted window
 
 ## Configuration
 
-Edit `comfort_layout.json` to tune margins, gap, overlay strength, and Apple Float cycle order. Press `Ctrl+Alt+R` after editing to reload.
+Edit `comfort_layout.json` to tune margins, gap, overlay strength, and Apple Float guide opacity. Press `Ctrl+Alt+R` after editing to reload.
 
 ## Verify
 
