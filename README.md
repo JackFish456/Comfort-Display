@@ -4,7 +4,15 @@ A small Windows 10 helper for making a close-up TV display feel more like a comf
 
 It uses normal user-mode Windows APIs only. It does not change firewall rules, alter company security settings, inject into apps, or reconfigure DisplayFusion.
 
+The app prefers `pywin32` when available and falls back to direct `ctypes` Win32 calls for the core window operations if those modules are missing.
+
 ## Run
+
+Double-click `run_jack_display.pyw` for a no-console launcher, or `Launch Jack Display.vbs` (uses your per-user Python install under `%LOCALAPPDATA%`, then falls back to the `pyw` launcher).
+
+You can pin File Explorer or the taskbar to `run_jack_display.pyw` for a one-click shortcut. Machine-specific `.lnk` files are not tracked here because they embed absolute profile paths (see `.gitignore`).
+
+You can also run it from PowerShell:
 
 ```powershell
 python .\run_jack_display.py
@@ -16,10 +24,10 @@ The control window can stay open in the corner while you work.
 
 - `Ctrl+Alt+1`: move the active window to the left centered pane.
 - `Ctrl+Alt+2`: move the active window to the right centered pane.
-- `Ctrl+Alt+D`: move the two most recent eligible windows into both panes.
+- `Ctrl+Alt+D`: move the two most recently observed eligible windows into both panes.
 - `Ctrl+Alt+C`: move the active window to a centered reading pane.
 - `Ctrl+Alt+A`: toggle Apple Float visual guides.
-- `Ctrl+Alt+Space`: cycle the active window through Apple Float positions.
+- `Ctrl+Alt+Space`: when Apple Float is on, cycle the active window through Apple Float positions.
 - `Ctrl+Alt+T`: toggle the warm dim overlay.
 - `Ctrl+Alt+Up`: increase overlay warmth/dimming.
 - `Ctrl+Alt+Down`: decrease overlay warmth/dimming.
@@ -33,6 +41,8 @@ The control window can stay open in the corner while you work.
 `Apple Float` adds subtle visual guides and lets you cycle the active window through soft positions. It only moves windows when you press a hotkey or button.
 
 If Windows blocks click-through overlay behavior, the warm overlay or Apple Float guide can be dismissed by clicking it or pressing `Escape`.
+
+If Windows refuses to move a protected, elevated, or otherwise restricted window, the status line reports it as `blocked` and leaves the window alone.
 
 ## Configuration
 

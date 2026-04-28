@@ -2,4 +2,22 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
 tmp*/
+.launcher_smoke_result.txt
+
+# Local / secrets (never commit credentials or environment files)
+.env
+.env.*
+*.pem
+secrets.json
+
+# OS / editor noise
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.stackdump
+
+# Windows shortcuts are machine-specific (paths embed the local user profile)
+*.lnk
