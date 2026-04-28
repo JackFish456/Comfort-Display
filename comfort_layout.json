@@ -1,0 +1,35 @@
+{
+  "active_preset": "comfort_dual",
+  "overlay": {
+    "color": "#ffb05e",
+    "alpha": 0.12,
+    "step": 0.03,
+    "min_alpha": 0.04,
+    "max_alpha": 0.35
+  },
+  "apple_float": {
+    "guide_alpha": 0.22,
+    "cycle_positions": ["left", "right", "reading", "float"]
+  },
+  "presets": {
+    "comfort_dual": {
+      "name": "Comfort Dual",
+      "side_margin_ratio": 0.10,
+      "top_margin_ratio": 0.08,
+      "bottom_margin_ratio": 0.07,
+      "gap": 24
+    },
+    "tall_dual": {
+      "name": "Tall Dual",
+      "side_margin_ratio": 0.06,
+      "top_margin_ratio": 0.04,
+      "bottom_margin_ratio": 0.04,
+      "gap": 20
+    },
+    "single_reading": {
+      "name": "Single Reading",
+      "width_ratio": 0.60,
+      "height_ratio": 0.82
+    }
+  }
+}
