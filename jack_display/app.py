@@ -24,24 +24,24 @@ from . import winapi
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 WM_HOTKEY = 0x0312
-WM_TRAYICON = 0x8001
-WM_LBUTTONUP = 0x0202
-WM_LBUTTONDBLCLK = 0x0203
-WM_RBUTTONUP = 0x0205
 PM_REMOVE = 0x0001
-GWLP_WNDPROC = -4
-NIM_ADD = 0x00000000
-NIM_DELETE = 0x00000002
-NIF_MESSAGE = 0x00000001
-NIF_ICON = 0x00000002
-NIF_TIP = 0x00000004
-IDI_APPLICATION = 32512
-TRAY_ICON_ID = 1
+ERROR_ALREADY_EXISTS = 183
+SW_RESTORE = 9
+APP_TITLE = "Jack Display Comfort Workspace"
+APP_USER_MODEL_ID = "JackDisplay.ComfortWorkspace"
 APP_BG = "#f1e9ff"
 PANEL_BG = "#eadfff"
 BUTTON_BG = "#ded0ff"
 BUTTON_ACTIVE_BG = "#d2c0ff"
 TEXT_FG = "#241b35"
+READING_ACTIVE_BG = "#c8b6ff"
+SNAP_ACTIVE_BG = "#7a3fd1"
+ACTIVE_TEXT_FG = "#ffffff"
+PICKER_HOVER_BG = "#b991ff"
+PICKER_SELECTED_BG = "#4b168f"
+ICON_BG = "#4b168f"
+ICON_ACCENT = "#f7c948"
+ICON_MARK = "#ffffff"
 
 VK = {
     "1": 0x31,
@@ -61,11 +61,11 @@ HOTKEYS = {
     2: ("Ctrl+Alt+2", VK["2"], "place_right"),
     3: ("Ctrl+Alt+D", VK["D"], "place_dual"),
     4: ("Ctrl+Alt+C", VK["C"], "place_reading"),
-    5: ("Ctrl+Alt+A", VK["A"], "toggle_apple"),
+    5: ("Ctrl+Alt+A", VK["A"], "toggle_snap_mode"),
     6: ("Ctrl+Alt+T", VK["T"], "toggle_overlay"),
     7: ("Ctrl+Alt+Up", VK["UP"], "overlay_up"),
     8: ("Ctrl+Alt+Down", VK["DOWN"], "overlay_down"),
-    9: ("Ctrl+Alt+R", VK["R"], "reset_view"),
+    9: ("Ctrl+Alt+R", VK["R"], "undo_view"),
     10: ("Ctrl+Alt+Q", VK["Q"], "quit"),
 }
 
@@ -84,27 +84,56 @@ class MSG(ctypes.Structure):
 
 user32 = ctypes.windll.user32
 shell32 = ctypes.windll.shell32
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
-class NOTIFYICONDATAW(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", wintypes.HICON),
-        ("szTip", wintypes.WCHAR * 128),
-    ]
+def configure_taskbar_app_id() -> None:
+    try:
+        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
+        shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
-WNDPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_ssize_t,
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-)
+def activate_existing_app_window() -> bool:
+    found_hwnd: list[int] = []
+
+    @EnumWindowsProc
+    def collect(hwnd: int, _lparam: int) -> bool:
+        length = user32.GetWindowTextLengthW(wintypes.HWND(hwnd))
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(wintypes.HWND(hwnd), buffer, length + 1)
+        if buffer.value == APP_TITLE:
+            found_hwnd.append(int(hwnd))
+            return False
+        return True
+
+    user32.EnumWindows(collect, 0)
+    if not found_hwnd:
+        return False
+
+    hwnd = wintypes.HWND(found_hwnd[0])
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def claim_single_instance() -> int | None:
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    mutex = kernel32.CreateMutexW(None, True, "Local\\JackDisplayComfortWorkspace")
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        activate_existing_app_window()
+        if mutex:
+            kernel32.CloseHandle(wintypes.HANDLE(mutex))
+        return None
+    return int(mutex) if mutex else 0
 
 
 class ComfortWorkspaceApp:
@@ -115,7 +144,9 @@ class ComfortWorkspaceApp:
         self.config_path = config_path
         self.config: dict[str, Any] = DEFAULT_CONFIG
         self.work_area = winapi.get_work_area()
-        self.apple_enabled = False
+        self.snap_enabled = False
+        self.snap_work_area: Rect | None = None
+        self.snap_moving_hwnd: int | None = None
         self.overlay_enabled = False
         self.overlay_alpha = float(DEFAULT_CONFIG["overlay"]["alpha"])
         self.overlay: tk.Toplevel | None = None
@@ -123,28 +154,29 @@ class ComfortWorkspaceApp:
         self.last_active_hwnd: int | None = None
         self.active_history: list[int] = []
         self.picker_active = False
+        self.reading_origins: dict[int, Rect] = {}
         self.structured_windows: dict[int, Rect] = {}
-        self.tray_added = False
-        self.tray_hwnd: int | None = None
-        self.tray_old_wndproc: int | None = None
-        self.tray_wndproc: WNDPROC | None = None
+        self.view_history: list[dict[int, Rect]] = []
+        self.icon_images: list[tk.PhotoImage] = []
 
         self.status_var = tk.StringVar()
         self.mode_var = tk.StringVar()
         self.screen_var = tk.StringVar()
         self.overlay_var = tk.StringVar()
-        self.root.title("Jack Display Comfort Workspace")
+        self.reading_button: ttk.Button | None = None
+        self.snap_button: ttk.Button | None = None
+        self.root.title(APP_TITLE)
         self.root.geometry("")
         self.root.configure(bg=APP_BG)
         self.root.resizable(False, False)
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
-        self.root.bind("<Unmap>", self.hide_to_tray_on_minimize)
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
         self.load_or_reload_config(startup=True)
+        self.apply_window_icon()
         self.build_ui()
-        self.setup_tray_icon()
         self.register_hotkeys()
         self.refresh_labels("Ready")
+        self.refresh_button_states()
         self.root.after(50, self.poll_hotkeys)
         self.root.after(100, self.observe_active_window)
 
@@ -168,7 +200,11 @@ class ComfortWorkspaceApp:
         style.configure("TFrame", background=APP_BG)
         style.configure("TLabel", background=APP_BG, foreground=TEXT_FG)
         style.configure("TButton", background=BUTTON_BG, foreground=TEXT_FG, padding=(8, 4))
+        style.configure("ReadingActive.TButton", background=READING_ACTIVE_BG, foreground=TEXT_FG, padding=(8, 4))
+        style.configure("SnapActive.TButton", background=SNAP_ACTIVE_BG, foreground=ACTIVE_TEXT_FG, padding=(8, 4))
         style.map("TButton", background=[("active", BUTTON_ACTIVE_BG)])
+        style.map("ReadingActive.TButton", background=[("active", BUTTON_ACTIVE_BG)])
+        style.map("SnapActive.TButton", background=[("active", PICKER_SELECTED_BG)])
 
     def build_ui(self) -> None:
         self.configure_styles()
@@ -176,111 +212,50 @@ class ComfortWorkspaceApp:
         frame = ttk.Frame(self.root)
         frame.pack(padx=8, pady=8)
         ttk.Button(frame, text="Comfort Dual", command=self.open_dual_selector).grid(row=0, column=0, **pad)
-        ttk.Button(frame, text="Reading Pane", command=self.place_reading).grid(row=0, column=1, **pad)
-        ttk.Button(frame, text="Free Float", command=self.toggle_apple).grid(row=1, column=0, **pad)
-        ttk.Button(frame, text="Reset View", command=self.reset_view).grid(row=1, column=1, **pad)
+        self.reading_button = ttk.Button(frame, text="Reading Pane", command=self.place_reading)
+        self.reading_button.grid(row=0, column=1, **pad)
+        self.snap_button = ttk.Button(frame, text="Snap Mode", command=self.toggle_snap_mode)
+        self.snap_button.grid(row=1, column=0, **pad)
+        ttk.Button(frame, text="Undo View", command=self.undo_view).grid(row=1, column=1, **pad)
         ttk.Button(frame, text="Quit", command=self.quit).grid(row=2, column=0, columnspan=2, **pad)
 
-    def setup_tray_icon(self) -> None:
-        self.root.update_idletasks()
-        hwnd = int(self.root.winfo_id())
-        self.tray_hwnd = hwnd
-        self.tray_wndproc = WNDPROC(self.tray_window_proc)
+    def refresh_button_states(self) -> None:
+        if self.snap_button is not None:
+            style = "SnapActive.TButton" if self.snap_enabled else "TButton"
+            self.snap_button.configure(style=style)
+        if self.reading_button is not None:
+            style = "ReadingActive.TButton" if self.active_reading_window() else "TButton"
+            self.reading_button.configure(style=style)
 
-        if hasattr(user32, "SetWindowLongPtrW"):
-            set_window_proc = user32.SetWindowLongPtrW
-        else:
-            set_window_proc = user32.SetWindowLongW
-        set_window_proc.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-        set_window_proc.restype = ctypes.c_void_p
-        user32.CallWindowProcW.argtypes = [
-            ctypes.c_void_p,
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.CallWindowProcW.restype = ctypes.c_ssize_t
-        user32.DefWindowProcW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.DefWindowProcW.restype = ctypes.c_ssize_t
-        user32.LoadIconW.restype = wintypes.HICON
-        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
-        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+    def apply_window_icon(self) -> None:
+        configure_taskbar_app_id()
+        self.icon_images = [self.build_icon_image(64), self.build_icon_image(32)]
+        try:
+            self.root.iconphoto(True, *self.icon_images)
+        except tk.TclError:
+            pass
 
-        self.tray_old_wndproc = int(
-            set_window_proc(
-                wintypes.HWND(hwnd),
-                GWLP_WNDPROC,
-                ctypes.cast(self.tray_wndproc, ctypes.c_void_p).value,
-            )
-            or 0
-        )
+    def build_icon_image(self, size: int) -> tk.PhotoImage:
+        image = tk.PhotoImage(width=size, height=size)
 
-        icon = user32.LoadIconW(None, IDI_APPLICATION)
-        data = NOTIFYICONDATAW()
-        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        data.hWnd = wintypes.HWND(hwnd)
-        data.uID = TRAY_ICON_ID
-        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
-        data.uCallbackMessage = WM_TRAYICON
-        data.hIcon = icon
-        data.szTip = "Jack Display Comfort Workspace"
-        self.tray_added = bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)))
+        def fill(color: str, gx: int, gy: int, gw: int, gh: int) -> None:
+            x1 = max(0, round((gx / 16) * size))
+            y1 = max(0, round((gy / 16) * size))
+            x2 = min(size, round(((gx + gw) / 16) * size))
+            y2 = min(size, round(((gy + gh) / 16) * size))
+            if x2 > x1 and y2 > y1:
+                image.put(color, to=(x1, y1, x2, y2))
 
-    def tray_window_proc(
-        self,
-        hwnd: int,
-        message: int,
-        wparam: int,
-        lparam: int,
-    ) -> int:
-        if message == WM_TRAYICON and int(wparam) == TRAY_ICON_ID:
-            if int(lparam) in {WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP}:
-                self.root.after(0, self.show_from_tray)
-                return 0
-
-        if self.tray_old_wndproc:
-            return int(
-                user32.CallWindowProcW(
-                    ctypes.c_void_p(self.tray_old_wndproc),
-                    wintypes.HWND(hwnd),
-                    message,
-                    wparam,
-                    lparam,
-                )
-            )
-        return int(user32.DefWindowProcW(wintypes.HWND(hwnd), message, wparam, lparam))
-
-    def hide_to_tray_on_minimize(self, event: tk.Event) -> None:
-        if event.widget is self.root and self.root.state() == "iconic":
-            self.hide_to_tray()
-
-    def hide_to_tray(self) -> None:
-        if self.tray_added:
-            self.root.withdraw()
-        else:
-            self.root.iconify()
-
-    def show_from_tray(self) -> None:
-        self.root.deiconify()
-        self.root.lift()
-        self.root.focus_force()
-        self.refresh_labels("Restored from tray")
-
-    def remove_tray_icon(self) -> None:
-        if not self.tray_added or self.tray_hwnd is None:
-            return
-        data = NOTIFYICONDATAW()
-        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        data.hWnd = wintypes.HWND(self.tray_hwnd)
-        data.uID = TRAY_ICON_ID
-        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
-        self.tray_added = False
+        fill(ICON_BG, 0, 0, 16, 16)
+        fill(ICON_ACCENT, 0, 0, 16, 2)
+        fill(ICON_ACCENT, 0, 14, 16, 2)
+        fill(ICON_ACCENT, 0, 0, 2, 16)
+        fill(ICON_ACCENT, 14, 0, 2, 16)
+        fill(ICON_MARK, 5, 4, 7, 2)
+        fill(ICON_MARK, 8, 4, 2, 7)
+        fill(ICON_MARK, 4, 9, 2, 3)
+        fill(ICON_MARK, 5, 11, 5, 2)
+        return image
 
     def load_or_reload_config(self, startup: bool = False) -> None:
         try:
@@ -301,7 +276,7 @@ class ComfortWorkspaceApp:
             f"Work area: {self.work_area.width}x{self.work_area.height} "
             f"at {self.work_area.x},{self.work_area.y}"
         )
-        mode = "Apple Float on" if self.apple_enabled else "Comfort Dual ready"
+        mode = "Snap Mode on" if self.snap_enabled else "Comfort Dual ready"
         self.mode_var.set(f"Mode: {mode}")
         overlay = "on" if self.overlay_enabled else "off"
         self.overlay_var.set(f"Warm overlay: {overlay} ({self.overlay_alpha:.2f})")
@@ -334,6 +309,8 @@ class ComfortWorkspaceApp:
         if hwnd:
             self.last_active_hwnd = hwnd
             self.remember_window(hwnd)
+            self.snap_active_window_if_needed(hwnd)
+        self.refresh_button_states()
         self.root.after(100, self.observe_active_window)
 
     def remember_window(self, hwnd: int) -> None:
@@ -413,6 +390,84 @@ class ComfortWorkspaceApp:
         except Exception:
             return self.work_area
 
+    def active_reading_window(self) -> bool:
+        hwnd = self.target_window()
+        if not hwnd or hwnd not in self.reading_origins:
+            return False
+        try:
+            return self.rects_close(winapi.get_window_rect(hwnd), self.reading_rect_for(hwnd))
+        except Exception:
+            return False
+
+    def remember_view(self, windows: list[int]) -> None:
+        snapshot: dict[int, Rect] = {}
+        for hwnd in windows:
+            if hwnd in snapshot or not winapi.is_eligible_window(hwnd):
+                continue
+            try:
+                snapshot[hwnd] = winapi.get_window_rect(hwnd)
+            except Exception:
+                continue
+        if not snapshot:
+            return
+        self.view_history.append(snapshot)
+        del self.view_history[:-20]
+
+    def remember_view_snapshot(self, snapshot: dict[int, Rect]) -> None:
+        clean_snapshot = {
+            hwnd: rect
+            for hwnd, rect in snapshot.items()
+            if winapi.is_eligible_window(hwnd)
+        }
+        if not clean_snapshot:
+            return
+        self.view_history.append(clean_snapshot)
+        del self.view_history[:-20]
+
+    def snap_active_window_if_needed(self, hwnd: int) -> None:
+        if not self.snap_enabled or self.picker_active or hwnd == self.snap_moving_hwnd:
+            return
+        try:
+            area = winapi.get_window_work_area(hwnd)
+            if self.snap_work_area is not None and area != self.snap_work_area:
+                return
+        except Exception:
+            return
+        self.snap_window_to_nearest_pane(hwnd)
+
+    def snap_window_to_nearest_pane(self, hwnd: int) -> bool:
+        try:
+            area = winapi.get_window_work_area(hwnd)
+            current = winapi.get_window_rect(hwnd)
+        except Exception:
+            return False
+
+        self.snap_work_area = area
+        left, right = dual_panes(area, self.active_dual_preset)
+        target = self.snap_target_for_rect(current, left, right)
+        if self.rects_close(current, target):
+            return False
+
+        self.remember_view_snapshot({hwnd: current})
+        self.snap_moving_hwnd = hwnd
+        try:
+            return winapi.move_window(hwnd, target)
+        finally:
+            self.snap_moving_hwnd = None
+
+    def snap_target_for_rect(self, current: Rect, left: Rect, right: Rect) -> Rect:
+        if current.width > max(left.width, right.width) * 1.25:
+            try:
+                cursor_x, _ = winapi.get_cursor_position()
+                return left if cursor_x < right.x else right
+            except Exception:
+                pass
+
+        current_center = current.x + (current.width // 2)
+        left_center = left.x + (left.width // 2)
+        right_center = right.x + (right.width // 2)
+        return left if abs(current_center - left_center) <= abs(current_center - right_center) else right
+
     def move_active_to(self, rect: Rect, label: str) -> None:
         hwnd = self.target_window()
         if not hwnd:
@@ -435,6 +490,8 @@ class ComfortWorkspaceApp:
         hwnd = self.target_window()
         left, _ = self.dual_rects_for(hwnd)
         if hwnd:
+            self.remember_view([hwnd])
+            self.snap_work_area = self.work_area_for(hwnd)
             self.structured_windows[hwnd] = left
         self.move_window_to(hwnd, left, "Left pane")
 
@@ -442,6 +499,8 @@ class ComfortWorkspaceApp:
         hwnd = self.target_window()
         _, right = self.dual_rects_for(hwnd)
         if hwnd:
+            self.remember_view([hwnd])
+            self.snap_work_area = self.work_area_for(hwnd)
             self.structured_windows[hwnd] = right
         self.move_window_to(hwnd, right, "Right pane")
 
@@ -487,11 +546,14 @@ class ComfortWorkspaceApp:
     def start_spatial_dual_picker(self, area: Rect, windows: list[int]) -> None:
         original_rects: dict[int, Rect] = {}
         badges: list[tk.Toplevel] = []
+        borders: dict[int, list[tk.Toplevel]] = {}
+        number_badges: dict[int, tk.Toplevel] = {}
         selected: list[int] = []
         previews = self.preview_rects(area, len(windows))
         self.picker_active = True
 
         def cleanup(restore_unselected: bool) -> None:
+            self.root.unbind_all("<Escape>")
             for badge in badges:
                 if badge.winfo_exists():
                     badge.destroy()
@@ -505,21 +567,51 @@ class ComfortWorkspaceApp:
             cleanup(restore_unselected=True)
             self.refresh_labels("Comfort Dual: picker cancelled")
 
+        def set_border(hwnd: int, color: str) -> None:
+            for border in borders.get(hwnd, []):
+                if border.winfo_exists():
+                    border.configure(bg=color)
+                    border.deiconify()
+                    border.lift()
+
+        def hide_border(hwnd: int) -> None:
+            if hwnd in selected:
+                return
+            for border in borders.get(hwnd, []):
+                if border.winfo_exists():
+                    border.withdraw()
+
+        def show_number(hwnd: int, number: int) -> None:
+            marker = number_badges.get(hwnd)
+            if marker is None or not marker.winfo_exists():
+                return
+            for child in marker.winfo_children():
+                child.configure(text=str(number))
+            marker.deiconify()
+            marker.lift()
+
         def choose(hwnd: int) -> None:
             if hwnd in selected:
                 return
             selected.append(hwnd)
+            set_border(hwnd, PICKER_SELECTED_BG)
+            show_number(hwnd, len(selected))
             if len(selected) < 2:
-                for badge in badges:
-                    if int(getattr(badge, "selected_hwnd", 0)) == hwnd and badge.winfo_exists():
-                        badge.configure(bg=BUTTON_ACTIVE_BG)
-                        for child in badge.winfo_children():
-                            child.configure(bg=BUTTON_ACTIVE_BG)
                 self.refresh_labels("Comfort Dual: choose right panel")
                 return
 
+            previous_view = {
+                hwnd: original_rects[hwnd]
+                for hwnd in selected
+                if hwnd in original_rects
+            }
             cleanup(restore_unselected=True)
-            self.apply_dual_pair(selected[0], selected[1], area)
+            self.apply_dual_pair(selected[0], selected[1], area, previous_view)
+
+        def bind_picker_events(widget: tk.Misc, hwnd: int) -> None:
+            widget.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            widget.bind("<Enter>", lambda _event, selected_hwnd=hwnd: set_border(selected_hwnd, PICKER_HOVER_BG))
+            widget.bind("<Leave>", lambda _event, selected_hwnd=hwnd: hide_border(selected_hwnd))
 
         for hwnd, rect in zip(windows, previews, strict=False):
             try:
@@ -535,30 +627,72 @@ class ComfortWorkspaceApp:
             badge.configure(bg=APP_BG)
             badge.geometry(f"{rect.width}x{rect.height}+{rect.x}+{rect.y}")
             badge.selected_hwnd = hwnd
-            badge.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            bind_picker_events(badge, hwnd)
+
+            border_specs = (
+                (rect.width, 7, rect.x, rect.y),
+                (rect.width, 7, rect.x, rect.bottom - 7),
+                (7, rect.height, rect.x, rect.y),
+                (7, rect.height, rect.right - 7, rect.y),
+            )
+            pane_borders: list[tk.Toplevel] = []
+            for width, height, x, y in border_specs:
+                border = tk.Toplevel(self.root)
+                border.overrideredirect(True)
+                border.attributes("-topmost", True)
+                border.configure(bg=PICKER_HOVER_BG)
+                border.geometry(f"{width}x{height}+{x}+{y}")
+                border.selected_hwnd = hwnd
+                bind_picker_events(border, hwnd)
+                border.withdraw()
+                pane_borders.append(border)
+                badges.append(border)
+            borders[hwnd] = pane_borders
 
             label_badge = tk.Toplevel(self.root)
             label_badge.overrideredirect(True)
             label_badge.attributes("-topmost", True)
             label_badge.configure(bg=BUTTON_BG)
-            label_badge.geometry(f"210x32+{rect.x + 12}+{rect.y + 12}")
+            label_badge.geometry(f"310x44+{rect.x + 12}+{rect.y + 12}")
             label_badge.selected_hwnd = hwnd
-            label_badge.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            bind_picker_events(label_badge, hwnd)
             title = winapi.describe_window(hwnd)
-            if len(title) > 26:
-                title = title[:23] + "..."
+            if len(title) > 32:
+                title = title[:29] + "..."
             label = tk.Label(
                 label_badge,
                 text=title,
                 bg=BUTTON_BG,
                 fg=TEXT_FG,
+                font=("Segoe UI", 13, "bold"),
                 padx=8,
                 pady=4,
             )
             label.pack(fill="both", expand=True)
-            label.bind("<Button-1>", lambda _event, selected_hwnd=hwnd: choose(selected_hwnd))
+            bind_picker_events(label, hwnd)
+
+            marker = tk.Toplevel(self.root)
+            marker.overrideredirect(True)
+            marker.attributes("-topmost", True)
+            marker.configure(bg=PICKER_SELECTED_BG)
+            marker.geometry(f"42x42+{rect.right - 54}+{rect.y + 12}")
+            marker.selected_hwnd = hwnd
+            bind_picker_events(marker, hwnd)
+            marker_label = tk.Label(
+                marker,
+                text="",
+                bg=PICKER_SELECTED_BG,
+                fg="white",
+                font=("Segoe UI", 19, "bold"),
+            )
+            marker_label.pack(fill="both", expand=True)
+            bind_picker_events(marker_label, hwnd)
+            marker.withdraw()
+            number_badges[hwnd] = marker
+
             badges.append(badge)
             badges.append(label_badge)
+            badges.append(marker)
 
         cancel_badge = tk.Toplevel(self.root)
         cancel_badge.overrideredirect(True)
@@ -566,12 +700,26 @@ class ComfortWorkspaceApp:
         cancel_badge.configure(bg=APP_BG)
         cancel_badge.geometry(f"90x34+{area.x + area.width - 112}+{area.y + 22}")
         ttk.Button(cancel_badge, text="Cancel", command=cancel).pack(fill="both", expand=True)
+        cancel_badge.bind("<Escape>", lambda _event: cancel())
         badges.append(cancel_badge)
+        self.root.bind_all("<Escape>", lambda _event: cancel())
+        cancel_badge.focus_force()
         self.refresh_labels("Comfort Dual: choose left panel")
 
-    def apply_dual_pair(self, left_hwnd: int, right_hwnd: int, area: Rect) -> None:
+    def apply_dual_pair(
+        self,
+        left_hwnd: int,
+        right_hwnd: int,
+        area: Rect,
+        previous_view: dict[int, Rect] | None = None,
+    ) -> None:
         left_rect, right_rect = dual_panes(area, self.active_dual_preset)
+        self.snap_work_area = area
         self.structured_windows.clear()
+        if previous_view is not None:
+            self.remember_view_snapshot(previous_view)
+        else:
+            self.remember_view([left_hwnd, right_hwnd])
         moved = 0
         for hwnd, rect in ((left_hwnd, left_rect), (right_hwnd, right_rect)):
             if winapi.move_window(hwnd, rect):
@@ -586,9 +734,11 @@ class ComfortWorkspaceApp:
             return
 
         area = self.work_area_for(target)
+        self.snap_work_area = area
         windows = self.recent_windows_on_work_area(area, limit=2)
         left, right = dual_panes(area, self.active_dual_preset)
         self.structured_windows.clear()
+        self.remember_view(windows)
         moved = 0
         for hwnd, rect in zip(windows, (left, right), strict=False):
             if winapi.move_window(hwnd, rect):
@@ -598,10 +748,41 @@ class ComfortWorkspaceApp:
 
     def place_reading(self) -> None:
         hwnd = self.target_window()
+        if not hwnd:
+            self.refresh_labels("Reading pane: no eligible active window")
+            return
+
         rect = self.reading_rect_for(hwnd)
-        if hwnd:
-            self.structured_windows[hwnd] = rect
+        try:
+            current = winapi.get_window_rect(hwnd)
+        except Exception:
+            current = None
+
+        original = self.reading_origins.get(hwnd)
+        if original is not None and current is not None and self.rects_close(current, rect):
+            self.remember_view([hwnd])
+            moved = winapi.move_window(hwnd, original)
+            self.reading_origins.pop(hwnd, None)
+            self.structured_windows.pop(hwnd, None)
+            title = winapi.describe_window(hwnd)
+            self.refresh_labels(f"Reading pane: {'restored' if moved else 'blocked'} - {title}")
+            self.refresh_button_states()
+            return
+
+        if current is not None:
+            self.remember_view_snapshot({hwnd: current})
+        self.reading_origins[hwnd] = current
+        self.structured_windows[hwnd] = rect
         self.move_window_to(hwnd, rect, "Reading pane")
+        self.refresh_button_states()
+
+    def rects_close(self, first: Rect, second: Rect) -> bool:
+        return (
+            abs(first.x - second.x) <= 16
+            and abs(first.y - second.y) <= 16
+            and abs(first.width - second.width) <= 16
+            and abs(first.height - second.height) <= 16
+        )
 
     def move_window_to(self, hwnd: int | None, rect: Rect, label: str) -> None:
         if not hwnd:
@@ -611,12 +792,23 @@ class ComfortWorkspaceApp:
         title = winapi.describe_window(hwnd)
         self.refresh_labels(f"{label}: {'moved' if moved else 'blocked'} - {title}")
 
-    def toggle_apple(self) -> None:
-        self.apple_enabled = not self.apple_enabled
-        if self.apple_enabled:
-            self.refresh_labels("Apple Float on")
-        else:
-            self.refresh_labels("Apple Float off")
+    def toggle_snap_mode(self) -> None:
+        self.snap_enabled = not self.snap_enabled
+        if not self.snap_enabled:
+            self.refresh_labels("Snap Mode off")
+            self.refresh_button_states()
+            return
+
+        hwnd = self.target_window()
+        if not hwnd:
+            self.refresh_labels("Snap Mode on: no eligible target window")
+            self.refresh_button_states()
+            return
+
+        self.snap_work_area = self.work_area_for(hwnd)
+        moved = self.snap_window_to_nearest_pane(hwnd)
+        self.refresh_labels(f"Snap Mode on: {'snapped active window' if moved else 'ready'}")
+        self.refresh_button_states()
 
     def overlay_geometry(self, area: Rect | None = None) -> str:
         area = area or self.work_area_for(self.target_window())
@@ -690,31 +882,41 @@ class ComfortWorkspaceApp:
     def reload_config(self) -> None:
         self.load_or_reload_config(startup=False)
 
-    def reset_view(self) -> None:
-        if not self.structured_windows:
-            self.place_dual()
+    def undo_view(self) -> None:
+        if not self.view_history:
+            self.refresh_labels("Undo View: no previous view")
             return
 
+        snapshot = self.view_history.pop()
         moved = 0
-        for hwnd, rect in list(self.structured_windows.items()):
+        for hwnd, rect in snapshot.items():
             if winapi.move_window(hwnd, rect):
+                self.structured_windows[hwnd] = rect
                 moved += 1
-        self.refresh_labels(f"Reset View: moved {moved} panel(s)")
+        self.refresh_labels(f"Undo View: restored {moved} window(s)")
 
     def quit(self) -> None:
         self.unregister_hotkeys()
         self.hide_overlay()
-        self.remove_tray_icon()
         self.root.destroy()
 
 
 def main() -> None:
+    mutex = claim_single_instance()
+    if mutex is None:
+        return
+
+    configure_taskbar_app_id()
     root = tk.Tk()
     root.tk.call("tk", "scaling", 1.0)
     config_path = Path(__file__).resolve().parent.parent / "comfort_layout.json"
     app = ComfortWorkspaceApp(root, config_path)
     app.refresh_labels(f"Ready - v{__version__}")
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        if mutex:
+            kernel32.CloseHandle(wintypes.HANDLE(mutex))
 
 
 if __name__ == "__main__":

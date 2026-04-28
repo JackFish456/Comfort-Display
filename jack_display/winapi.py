@@ -34,13 +34,24 @@ SKIP_CLASSES = {
     "Shell_TrayWnd",
     "WorkerW",
     "DV2ControlHost",
+    "Windows.UI.Core.CoreWindow",
+    "InputHostWndClass",
     "MsgrIMEWindowClass",
 }
 
 SKIP_TITLE_PARTS = {
     "displayfusion",
     "program manager",
+    "microsoft text input application",
+    "text input application",
+    "windows input experience",
+    "windows shell experience",
     "jack display comfort workspace",
+    "realtek",
+    "realtek audio",
+    "realtek audio console",
+    "realtek hd audio",
+    "rtk",
 }
 
 GWL_EXSTYLE = -20
@@ -108,6 +119,19 @@ def get_window_rect(hwnd: int) -> Rect:
     if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
         raise OSError("GetWindowRect failed")
     return Rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+
+
+def get_cursor_position() -> tuple[int, int]:
+    """Return the current cursor position in screen coordinates."""
+
+    if HAS_PYWIN32:
+        x, y = win32api.GetCursorPos()
+        return int(x), int(y)
+
+    point = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(point)):
+        raise OSError("GetCursorPos failed")
+    return int(point.x), int(point.y)
 
 
 def monitor_work_area(monitor: int) -> Rect:
