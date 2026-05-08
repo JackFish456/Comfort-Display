@@ -33,7 +33,7 @@ To remove those shortcuts:
 
 The control window can stay open in the corner while you work. It uses a simple
 purple-and-gold pixel `J` icon so it is easier to spot on the Windows taskbar.
-Close the window, use the `Quit` button, or press `Ctrl+Alt+Q` to fully exit.
+Close the window or press `Ctrl+Alt+Q` to fully exit.
 
 ## Hotkeys
 

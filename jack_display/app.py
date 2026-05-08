@@ -6,11 +6,13 @@ import ctypes
 from ctypes import wintypes
 import math
 from pathlib import Path
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Any
 
 from . import __version__
+from .glaze import GlazeController, GlazeState, GlazeStatus
 from .layout import (
     DEFAULT_CONFIG,
     Rect,
@@ -42,6 +44,11 @@ PICKER_SELECTED_BG = "#4b168f"
 ICON_BG = "#4b168f"
 ICON_ACCENT = "#f7c948"
 ICON_MARK = "#ffffff"
+GLAZE_ON_BG = "#4b168f"
+GLAZE_BUSY_BG = "#8e7bbf"
+GLAZE_UNRESPONSIVE_BG = "#a64646"
+
+GLAZE_POLL_INTERVAL_MS = 3000
 
 VK = {
     "1": 0x31,
@@ -165,6 +172,11 @@ class ComfortWorkspaceApp:
         self.overlay_var = tk.StringVar()
         self.reading_button: ttk.Button | None = None
         self.snap_button: ttk.Button | None = None
+        self.glaze_button: ttk.Button | None = None
+        self.glaze = GlazeController()
+        self.glaze_state: GlazeState = GlazeState.OFF
+        self._glaze_busy = False
+        self._glaze_poll_after_id: str | None = None
         self.root.title(APP_TITLE)
         self.root.geometry("")
         self.root.configure(bg=APP_BG)
@@ -179,6 +191,7 @@ class ComfortWorkspaceApp:
         self.refresh_button_states()
         self.root.after(50, self.poll_hotkeys)
         self.root.after(100, self.observe_active_window)
+        self.schedule_glaze_poll(initial_delay_ms=200)
 
     @property
     def active_dual_preset(self) -> dict[str, Any]:
@@ -202,9 +215,15 @@ class ComfortWorkspaceApp:
         style.configure("TButton", background=BUTTON_BG, foreground=TEXT_FG, padding=(8, 4))
         style.configure("ReadingActive.TButton", background=READING_ACTIVE_BG, foreground=TEXT_FG, padding=(8, 4))
         style.configure("SnapActive.TButton", background=SNAP_ACTIVE_BG, foreground=ACTIVE_TEXT_FG, padding=(8, 4))
+        style.configure("GlazeOn.TButton", background=GLAZE_ON_BG, foreground=ACTIVE_TEXT_FG, padding=(8, 4))
+        style.configure("GlazeBusy.TButton", background=GLAZE_BUSY_BG, foreground=ACTIVE_TEXT_FG, padding=(8, 4))
+        style.configure("GlazeUnresponsive.TButton", background=GLAZE_UNRESPONSIVE_BG, foreground=ACTIVE_TEXT_FG, padding=(8, 4))
         style.map("TButton", background=[("active", BUTTON_ACTIVE_BG)])
         style.map("ReadingActive.TButton", background=[("active", BUTTON_ACTIVE_BG)])
         style.map("SnapActive.TButton", background=[("active", PICKER_SELECTED_BG)])
+        style.map("GlazeOn.TButton", background=[("active", PICKER_SELECTED_BG)])
+        style.map("GlazeBusy.TButton", background=[("active", GLAZE_BUSY_BG)])
+        style.map("GlazeUnresponsive.TButton", background=[("active", GLAZE_UNRESPONSIVE_BG)])
 
     def build_ui(self) -> None:
         self.configure_styles()
@@ -217,7 +236,8 @@ class ComfortWorkspaceApp:
         self.snap_button = ttk.Button(frame, text="Snap Mode", command=self.toggle_snap_mode)
         self.snap_button.grid(row=1, column=0, **pad)
         ttk.Button(frame, text="Undo View", command=self.undo_view).grid(row=1, column=1, **pad)
-        ttk.Button(frame, text="Quit", command=self.quit).grid(row=2, column=0, columnspan=2, **pad)
+        self.glaze_button = ttk.Button(frame, text="Glaze: Off", command=self.toggle_glaze)
+        self.glaze_button.grid(row=2, column=0, columnspan=2, sticky="ew", **pad)
 
     def refresh_button_states(self) -> None:
         if self.snap_button is not None:
@@ -226,6 +246,85 @@ class ComfortWorkspaceApp:
         if self.reading_button is not None:
             style = "ReadingActive.TButton" if self.active_reading_window() else "TButton"
             self.reading_button.configure(style=style)
+
+    def refresh_glaze_button(self) -> None:
+        if self.glaze_button is None:
+            return
+        if self._glaze_busy:
+            self.glaze_button.configure(text="Glaze: ...", style="GlazeBusy.TButton", state="disabled")
+            return
+
+        text, style, enabled = self.glaze_button_appearance(self.glaze_state)
+        self.glaze_button.configure(text=text, style=style, state=("normal" if enabled else "disabled"))
+
+    @staticmethod
+    def glaze_button_appearance(state: GlazeState) -> tuple[str, str, bool]:
+        if state is GlazeState.ON:
+            return ("Glaze: On", "GlazeOn.TButton", True)
+        if state is GlazeState.UNRESPONSIVE:
+            return ("Glaze: Unresponsive (click to reset)", "GlazeUnresponsive.TButton", True)
+        if state is GlazeState.NOT_INSTALLED:
+            return ("Glaze: Not Installed", "TButton", False)
+        return ("Glaze: Off", "TButton", True)
+
+    def toggle_glaze(self) -> None:
+        if self._glaze_busy or self.glaze_button is None:
+            return
+        if self.glaze_state is GlazeState.NOT_INSTALLED:
+            self.refresh_labels(f"Glaze: CLI not found at {self.glaze.cli_path}")
+            return
+
+        self._glaze_busy = True
+        self.refresh_glaze_button()
+        self.refresh_labels("Glaze: working...")
+
+        thread = threading.Thread(target=self._run_glaze_action, daemon=True)
+        thread.start()
+
+    def _run_glaze_action(self) -> None:
+        try:
+            status = self.glaze.toggle()
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            status = GlazeStatus(GlazeState.UNRESPONSIVE, f"Glaze toggle failed: {exc}")
+        self._post_to_main(lambda: self._on_glaze_action_complete(status))
+
+    def _on_glaze_action_complete(self, status: GlazeStatus) -> None:
+        self._glaze_busy = False
+        self.glaze_state = status.state
+        self.refresh_labels(f"Glaze: {status.message}")
+        self.refresh_glaze_button()
+
+    def schedule_glaze_poll(self, initial_delay_ms: int = GLAZE_POLL_INTERVAL_MS) -> None:
+        self._glaze_poll_after_id = self.root.after(initial_delay_ms, self._kick_glaze_poll)
+
+    def _kick_glaze_poll(self) -> None:
+        self._glaze_poll_after_id = None
+        if not self._glaze_busy:
+            thread = threading.Thread(target=self._run_glaze_poll, daemon=True)
+            thread.start()
+        self.schedule_glaze_poll(GLAZE_POLL_INTERVAL_MS)
+
+    def _run_glaze_poll(self) -> None:
+        try:
+            state = self.glaze.state()
+        except Exception:
+            return
+        self._post_to_main(lambda: self._on_glaze_poll_result(state))
+
+    def _on_glaze_poll_result(self, state: GlazeState) -> None:
+        if self._glaze_busy:
+            return
+        if state is self.glaze_state:
+            return
+        self.glaze_state = state
+        self.refresh_glaze_button()
+
+    def _post_to_main(self, callback: Any) -> None:
+        try:
+            if self.root.winfo_exists():
+                self.root.after(0, callback)
+        except tk.TclError:
+            pass
 
     def apply_window_icon(self) -> None:
         configure_taskbar_app_id()
@@ -896,6 +995,12 @@ class ComfortWorkspaceApp:
         self.refresh_labels(f"Undo View: restored {moved} window(s)")
 
     def quit(self) -> None:
+        if self._glaze_poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._glaze_poll_after_id)
+            except tk.TclError:
+                pass
+            self._glaze_poll_after_id = None
         self.unregister_hotkeys()
         self.hide_overlay()
         self.root.destroy()
