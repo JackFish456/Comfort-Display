@@ -6,6 +6,7 @@ import unittest
 
 from jack_display.glaze import (
     GLAZEWM_PROCESS_NAME,
+    GLAZEWM_WATCHER_PROCESS_NAME,
     CommandResult,
     GlazeController,
     GlazeState,
@@ -15,8 +16,10 @@ from jack_display.glaze import (
 class FakeProcessTable:
     def __init__(self, names: list[str] | None = None) -> None:
         self.names = list(names or [])
+        self.list_calls = 0
 
     def list(self) -> list[str]:
+        self.list_calls += 1
         return list(self.names)
 
     def add(self, name: str) -> None:
@@ -120,6 +123,11 @@ class GlazeControllerTests(unittest.TestCase):
         controller, *_ = self._build()
         self.assertEqual(controller.state(), GlazeState.OFF)
 
+    def test_state_reports_starting_when_only_watcher_is_running(self) -> None:
+        process_table = FakeProcessTable([GLAZEWM_WATCHER_PROCESS_NAME])
+        controller, *_ = self._build(process_table=process_table)
+        self.assertEqual(controller.state(), GlazeState.STARTING)
+
     def test_state_reports_on_when_process_responds(self) -> None:
         process_table = FakeProcessTable([GLAZEWM_PROCESS_NAME])
         runner = ScriptedRunner([_ok()])
@@ -131,6 +139,24 @@ class GlazeControllerTests(unittest.TestCase):
         runner = ScriptedRunner([_timed_out()])
         controller, *_ = self._build(process_table=process_table, runner=runner)
         self.assertEqual(controller.state(), GlazeState.UNRESPONSIVE)
+
+    def test_state_invokes_process_lister_exactly_once(self) -> None:
+        # The glazewm + glazewm-watcher checks share a single tasklist
+        # snapshot per state() call so a one-off subprocess hiccup can't
+        # make them disagree and flip the UI to OFF mid-poll.
+        process_table = FakeProcessTable([GLAZEWM_PROCESS_NAME])
+        runner = ScriptedRunner([_ok()])
+        controller, table, *_ = self._build(
+            process_table=process_table, runner=runner
+        )
+        controller.state()
+        self.assertEqual(table.list_calls, 1)
+
+    def test_state_invokes_process_lister_exactly_once_when_off(self) -> None:
+        process_table = FakeProcessTable([])
+        controller, table, *_ = self._build(process_table=process_table)
+        self.assertEqual(controller.state(), GlazeState.OFF)
+        self.assertEqual(table.list_calls, 1)
 
     def test_start_skips_when_already_running_and_responsive(self) -> None:
         process_table = FakeProcessTable([GLAZEWM_PROCESS_NAME])
@@ -192,6 +218,30 @@ class GlazeControllerTests(unittest.TestCase):
         controller, _table, _runner, _spawner, _sleeper = self._build()
         status = controller.stop()
         self.assertEqual(status.state, GlazeState.OFF)
+
+    def test_stop_terminates_watcher_before_waiting_for_off(self) -> None:
+        process_table = FakeProcessTable([GLAZEWM_PROCESS_NAME, GLAZEWM_WATCHER_PROCESS_NAME])
+        ok_then_exit = ScriptedRunner([_ok(), CommandResult(0, "", "", False)])
+
+        def on_sleep_remove() -> None:
+            process_table.remove_all(GLAZEWM_PROCESS_NAME)
+
+        sleeper = FakeSleeper(on_sleep=on_sleep_remove)
+        controller, *_ = self._build(
+            process_table=process_table,
+            runner=ok_then_exit,
+            sleeper=sleeper,
+        )
+        status = controller.stop()
+        self.assertEqual(status.state, GlazeState.OFF)
+        self.assertEqual(process_table.list(), [])
+
+    def test_toggle_stops_when_only_watcher_is_running(self) -> None:
+        process_table = FakeProcessTable([GLAZEWM_WATCHER_PROCESS_NAME])
+        controller, *_ = self._build(process_table=process_table)
+        status = controller.toggle()
+        self.assertEqual(status.state, GlazeState.OFF)
+        self.assertEqual(process_table.list(), [])
 
     def test_stop_uses_wm_exit_when_responsive(self) -> None:
         process_table = FakeProcessTable([GLAZEWM_PROCESS_NAME])

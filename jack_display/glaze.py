@@ -39,6 +39,7 @@ DEFAULT_GLAZEWM_CONFIG = (
     Path(os.environ.get("USERPROFILE", "")) / ".glzr" / "glazewm" / "config.yaml"
 )
 GLAZEWM_PROCESS_NAME = "glazewm.exe"
+GLAZEWM_WATCHER_PROCESS_NAME = "glazewm-watcher.exe"
 
 DEFAULT_QUERY_TIMEOUT_SECONDS = 2.0
 DEFAULT_START_GRACE_SECONDS = 6.0
@@ -85,27 +86,38 @@ ProcessTerminator = Callable[[str], int]
 
 
 def _default_process_lister() -> list[str]:
-    """Return the lowercased image names of currently running processes."""
+    """Return the lowercased image names of currently running processes.
 
-    try:
-        completed = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=4.0,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    A single retry absorbs transient ``tasklist`` hiccups (corporate AV / EDR
+    can briefly hold the snapshot). Without the retry, one timeout in the
+    middle of a state poll would flip the UI to ``OFF`` even though GlazeWM
+    is still running.
+    """
 
-    names: list[str] = []
-    for line in completed.stdout.splitlines():
-        if not line.startswith('"'):
-            continue
-        end = line.find('"', 1)
-        if end > 1:
-            names.append(line[1:end].lower())
-    return names
+    for attempt in range(2):
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=4.0,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            if attempt == 0:
+                continue
+            return []
+
+        names: list[str] = []
+        for line in completed.stdout.splitlines():
+            if not line.startswith('"'):
+                continue
+            end = line.find('"', 1)
+            if end > 1:
+                names.append(line[1:end].lower())
+        return names
+
+    return []
 
 
 def _default_command_runner(args: Sequence[str], timeout: float) -> CommandResult:
@@ -193,6 +205,9 @@ class GlazeController:
     def is_process_running(self) -> bool:
         return GLAZEWM_PROCESS_NAME in self._process_lister()
 
+    def is_watcher_running(self) -> bool:
+        return GLAZEWM_WATCHER_PROCESS_NAME in self._process_lister()
+
     def is_responsive(self) -> bool:
         result = self._command_runner(
             [str(self.cli_path), "query", "paused"],
@@ -203,8 +218,14 @@ class GlazeController:
     def state(self) -> GlazeState:
         if not self.is_installed():
             return GlazeState.NOT_INSTALLED
-        running = self.is_process_running()
-        if not running:
+        # Single tasklist invocation per state() so a transient subprocess
+        # failure can't make the glazewm + glazewm-watcher checks disagree.
+        # Two separate calls used to flip the UI to OFF on a one-off timeout
+        # even though Glaze was running.
+        names = self._process_lister()
+        if GLAZEWM_PROCESS_NAME not in names:
+            if GLAZEWM_WATCHER_PROCESS_NAME in names:
+                return GlazeState.STARTING
             return GlazeState.OFF
         if self.is_responsive():
             return GlazeState.ON
@@ -215,6 +236,7 @@ class GlazeController:
             return GlazeStatus(GlazeState.NOT_INSTALLED, f"GlazeWM CLI not found: {self.cli_path}")
 
         if self.is_process_running() and not self.is_responsive():
+            self._process_terminator(GLAZEWM_WATCHER_PROCESS_NAME)
             terminated = self._process_terminator(GLAZEWM_PROCESS_NAME)
             if terminated == 0 and self.is_process_running():
                 return GlazeStatus(
@@ -242,10 +264,12 @@ class GlazeController:
         )
 
     def stop(self) -> GlazeStatus:
-        if not self.is_process_running():
+        if not self.is_process_running() and not self.is_watcher_running():
             return GlazeStatus(GlazeState.OFF, "GlazeWM was not running")
 
-        if self.is_responsive():
+        self._process_terminator(GLAZEWM_WATCHER_PROCESS_NAME)
+
+        if self.is_process_running() and self.is_responsive():
             self._command_runner(
                 [str(self.cli_path), "command", "wm-exit"],
                 self.query_timeout_seconds,
@@ -254,6 +278,7 @@ class GlazeController:
                 return GlazeStatus(GlazeState.OFF, "GlazeWM exited")
 
         terminated = self._process_terminator(GLAZEWM_PROCESS_NAME)
+        self._process_terminator(GLAZEWM_WATCHER_PROCESS_NAME)
         if self._wait_for_stopped(self.stop_grace_seconds):
             descriptor = "terminated" if terminated > 0 else "exited"
             return GlazeStatus(GlazeState.OFF, f"GlazeWM {descriptor}")
@@ -265,7 +290,7 @@ class GlazeController:
 
     def toggle(self) -> GlazeStatus:
         current = self.state()
-        if current is GlazeState.ON or current is GlazeState.UNRESPONSIVE:
+        if current in (GlazeState.STARTING, GlazeState.ON, GlazeState.UNRESPONSIVE):
             return self.stop()
         return self.start()
 
@@ -273,7 +298,10 @@ class GlazeController:
         return self._poll_until(timeout_seconds, self.is_responsive)
 
     def _wait_for_stopped(self, timeout_seconds: float) -> bool:
-        return self._poll_until(timeout_seconds, lambda: not self.is_process_running())
+        return self._poll_until(
+            timeout_seconds,
+            lambda: not self.is_process_running() and not self.is_watcher_running(),
+        )
 
     def _poll_until(self, timeout_seconds: float, predicate: Callable[[], bool]) -> bool:
         if predicate():

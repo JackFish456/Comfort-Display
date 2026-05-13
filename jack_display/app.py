@@ -177,6 +177,15 @@ class ComfortWorkspaceApp:
         self.glaze_state: GlazeState = GlazeState.OFF
         self._glaze_busy = False
         self._glaze_poll_after_id: str | None = None
+        # Single-flight guard. Without it, a slow poll (e.g. a tasklist
+        # timeout) could land its callback after a newer poll already
+        # applied the correct state and clobber it.
+        self._glaze_poll_in_flight = False
+        # Bumped every time the user dispatches a toggle. Polls capture the
+        # current generation when they start and drop their result if a
+        # toggle has happened in the meantime, so a pre-toggle stale read
+        # can't overwrite the post-toggle state.
+        self._glaze_action_generation = 0
         self.root.title(APP_TITLE)
         self.root.geometry("")
         self.root.configure(bg=APP_BG)
@@ -261,6 +270,8 @@ class ComfortWorkspaceApp:
     def glaze_button_appearance(state: GlazeState) -> tuple[str, str, bool]:
         if state is GlazeState.ON:
             return ("Glaze: On", "GlazeOn.TButton", True)
+        if state is GlazeState.STARTING:
+            return ("Glaze: Starting", "GlazeBusy.TButton", True)
         if state is GlazeState.UNRESPONSIVE:
             return ("Glaze: Unresponsive (click to reset)", "GlazeUnresponsive.TButton", True)
         if state is GlazeState.NOT_INSTALLED:
@@ -275,6 +286,7 @@ class ComfortWorkspaceApp:
             return
 
         self._glaze_busy = True
+        self._glaze_action_generation += 1
         self.refresh_glaze_button()
         self.refresh_labels("Glaze: working...")
 
@@ -299,20 +311,33 @@ class ComfortWorkspaceApp:
 
     def _kick_glaze_poll(self) -> None:
         self._glaze_poll_after_id = None
-        if not self._glaze_busy:
-            thread = threading.Thread(target=self._run_glaze_poll, daemon=True)
+        if not self._glaze_busy and not self._glaze_poll_in_flight:
+            self._glaze_poll_in_flight = True
+            generation = self._glaze_action_generation
+            thread = threading.Thread(
+                target=self._run_glaze_poll,
+                args=(generation,),
+                daemon=True,
+            )
             thread.start()
         self.schedule_glaze_poll(GLAZE_POLL_INTERVAL_MS)
 
-    def _run_glaze_poll(self) -> None:
+    def _run_glaze_poll(self, generation: int) -> None:
         try:
             state = self.glaze.state()
         except Exception:
+            self._post_to_main(self._on_glaze_poll_failed)
             return
-        self._post_to_main(lambda: self._on_glaze_poll_result(state))
+        self._post_to_main(lambda: self._on_glaze_poll_result(state, generation))
 
-    def _on_glaze_poll_result(self, state: GlazeState) -> None:
+    def _on_glaze_poll_failed(self) -> None:
+        self._glaze_poll_in_flight = False
+
+    def _on_glaze_poll_result(self, state: GlazeState, generation: int) -> None:
+        self._glaze_poll_in_flight = False
         if self._glaze_busy:
+            return
+        if generation != self._glaze_action_generation:
             return
         if state is self.glaze_state:
             return

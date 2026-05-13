@@ -5,6 +5,7 @@ venv/
 env/
 tmp*/
 .launcher_smoke_result.txt
+jack_display_launch.log
 
 # Local / secrets (never commit credentials or environment files)
 .env
